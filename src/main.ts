@@ -900,207 +900,6 @@ const AGENT_SANDBOX_DEMO_STEPS: DemoStep[] = [
   },
 ];
 
-const PROTECT_DEMO_STEPS: DemoStep[] = [
-  {
-    id: "zone-launch",
-    title: "Create an isolated Edera zone",
-    description:
-      "Launch a lightweight Edera <code class='guide-code'>Zone</code>. The <code class='guide-code'>--wait</code> flag waits until the zone is <code class='guide-code'>READY</code>.",
-    command:
-      "protect zone launch -n test-zone --min-cpus 1 -C 2 -c 2 --wait",
-  },
-  {
-    id: "zone-list",
-    title: "Inspect the zone",
-    description:
-      "List the <code class='guide-code'>Zones</code> managed by Edera and inspect its networking information.",
-    command: "protect zone list",
-  },
-  {
-    id: "edera-runtimeclass-apply",
-    title: "Apply the Edera RuntimeClass",
-    description:
-      "Create the Edera <code class='guide-code'>RuntimeClass</code> so Kubernetes recognises the <code class='guide-code'>edera</code> runtime.",
-    command: "kubectl apply -f edera/runtimeclass-edera.yaml",
-  },
-  {
-    id: "edera-runtimeclass-list",
-    title: "Verify the Edera RuntimeClass",
-    description:
-      "List <code class='guide-code'>RuntimeClass</code> names and confirm that <code class='guide-code'>edera</code> is available.",
-    command: "kubectl get runtimeclass",
-  },
-  {
-    id: "edera-node-label",
-    title: "Label the Edera node",
-    description:
-      "Label <code class='guide-code'>node-3</code> with <code class='guide-code'>runtime=edera</code>. The Edera <code class='guide-code'>RuntimeClass</code> uses this node selector to schedule Edera-protected workloads onto the correct node.",
-    command: "kubectl label node node-3 runtime=edera",
-  },
-  {
-    id: "edera-pod-apply",
-    title: "Deploy the CPU-configured Edera pod",
-    description:
-      "Apply the <code class='guide-code'>nginx</code> manifest. It uses <code class='guide-code'>runtimeClassName: edera</code> and requests 4 CPUs with the matching <code class='guide-code'>dev.edera/cpu</code> annotation.",
-    command: "kubectl apply -f edera/pod-nginx.yaml",
-  },
-  {
-    id: "edera-pod-runtimeclass",
-    title: "Verify the pod RuntimeClass",
-    description:
-      "Confirm that the <code class='guide-code'>edera-protect-pod</code> is using the Edera <code class='guide-code'>RuntimeClass</code>.",
-    command: "kubectl get pod edera-protect-pod -o jsonpath='{.spec.runtimeClassName}'",
-  },
-  {
-    id: "edera-workload-list",
-    title: "Prove the pod is Edera protected",
-    description:
-      "List the Edera workloads and verify <code class='guide-code'>edera-protect-pod</code> appears as a running workload attached to <code class='guide-code'>test-zone</code>.",
-    command: "protect workload list",
-  },
-  {
-    id: "deployment-apply",
-    title: "Deploy an Edera-backed Deployment",
-    description:
-      "Apply an <code class='guide-code'>apps/v1</code> Deployment with two <code class='guide-code'>nginx</code> replicas. The pod template uses <code class='guide-code'>runtimeClassName: edera</code>, so both replicas remain <code class='guide-code'>Pending</code> until the Edera <code class='guide-code'>RuntimeClass</code> is available.",
-    command: "kubectl apply -f edera/nginx-deployment.yaml",
-  },
-  {
-    id: "deployment-list",
-    title: "Inspect the Deployment",
-    description:
-      "List the Deployment and verify its two replicas become <code class='guide-code'>READY</code> once the Edera <code class='guide-code'>RuntimeClass</code> is enabled.",
-    command: "kubectl get deployments",
-  },
-  {
-    id: "workload-launch",
-    title: "Launch a workload inside the zone",
-    description:
-      "Start an Alpine container inside the isolated <code class='guide-code'>test-zone</code>.",
-    command:
-      "protect workload launch --zone test-zone --name alpine-long -- docker.io/library/alpine:latest sleep 3600",
-  },
-  {
-    id: "workload-list",
-    title: "Inspect the workload",
-    description:
-      "List workloads and see which Edera zone contains the Alpine container.",
-    command: "protect workload list",
-  },
-  {
-    id: "workload-exec",
-    title: "Verify the Edera zone kernel",
-    description:
-      "Exec into the <code class='guide-code'>Alpine</code> workload and run <code class='guide-code'>uname -r | grep 'edera'</code>. Expected output: <code class='guide-code'>6.18.44-edera-zone</code>. This demonstrates that the workload is using the dedicated kernel booted for the isolated Edera <code class='guide-code'>Zone</code> rather than the shared host kernel. In a traditional container, <code class='guide-code'>uname -r</code> would normally report the host kernel because containers share one kernel.",
-    command:
-      "protect workload exec alpine-long /bin/sh -c \"uname -r | grep 'edera'\"",
-    optional: true,
-  },
-  {
-    id: "host-kernel",
-    title: "Compare the host kernel",
-    description:
-      "After exiting the workload, run <code class='guide-code'>uname -r</code> on the host. Expected output: <code class='guide-code'>6.18.44-edera-host</code>. The different kernel suffix proves the workload is not using the host's shared kernel; the Edera <code class='guide-code'>Zone</code> is running its own isolated kernel in the simulator.",
-    command: "uname -r",
-    optional: true,
-  },
-  {
-    id: "workload-destroy",
-    title: "Destroy the workload",
-    description:
-      "Remove the workload from the Edera <code class='guide-code'>Zone</code>.",
-    command: "protect workload destroy alpine-long --wait",
-  },
-  {
-    id: "zone-destroy",
-    title: "Destroy the zone",
-    description:
-      "Tear down the isolated Edera <code class='guide-code'>Zone</code>.",
-    command: "protect zone destroy test-zone",
-  },
-  {
-    id: "final-list",
-    title: "Verify the zone lifecycle",
-    description:
-      "List the <code class='guide-code'>Zones</code> one final time and observe the destroyed tombstone.",
-    command: "protect zone list",
-  },
-];
-
-// Steps for the optional "ExploitGym Agent Demo" - a self-contained attacker
-// walkthrough that contrasts a shared-kernel proxy with an Edera-isolated one.
-// Completing it awards no reward (see markDemoStepComplete); it is purely for
-// exploration. Step ids are namespaced "exploitgym-*" so they never collide
-// with the Edera demo's step ids and progress in each demo persists
-// independently when toggling between them.
-const EXPLOITGYM_DEMO_STEPS: DemoStep[] = [
-  {
-    // Reuses the Edera demo's step id and command: applying this manifest adds
-    // the "edera" RuntimeClass to the cluster. Until it exists, proxy-edera
-    // stays Pending (it requests runtimeClassName: edera in its spec but can't
-    // be admitted). Sharing the id means the step auto-completes if the user
-    // already created the class in the Edera demo.
-    id: "edera-runtimeclass-apply",
-    title: "Create the Edera RuntimeClass",
-    description:
-      "Create the <code class='guide-code'>edera</code> RuntimeClass. <code class='guide-code'>proxy-edera</code> requests it in its pod spec, so until this exists the pod stays <code class='guide-code'>Pending</code> - just like the Edera demo.",
-    command: "kubectl apply -f edera/runtimeclass-edera.yaml",
-  },
-  {
-    // Reuses the Edera demo's node-label step id/command. The edera
-    // RuntimeClass schedules via a runtime=edera node selector, so labelling a
-    // node lets proxy-edera finally schedule and become Running.
-    id: "edera-node-label",
-    title: "Schedule the Edera proxy onto an Edera node",
-    description:
-      "Label <code class='guide-code'>node-3</code> with <code class='guide-code'>runtime=edera</code>. The RuntimeClass uses this node selector, so once a matching node exists <code class='guide-code'>proxy-edera</code> schedules and moves to <code class='guide-code'>Running</code>.",
-    command: "kubectl label node node-3 runtime=edera",
-  },
-  {
-    id: "exploitgym-pods",
-    title: "Inspect the ExploitGym pods",
-    description:
-      "List the three scenario pods. With the RuntimeClass created, <code class='guide-code'>proxy-edera</code> is now Running inside an isolated Edera zone, while <code class='guide-code'>proxy-control</code> shares the host kernel (no runtimeClass).",
-    command:
-      "kubectl get pods -n exploitgym agent proxy-control proxy-edera -o custom-columns=POD:.metadata.name,RUNTIME_CLASS:.spec.runtimeClassName,ROLE:.metadata.labels.variant",
-  },
-  {
-    id: "exploitgym-agent",
-    title: "Confirm the agent is sandboxed",
-    description:
-      "The agent has no internet - its only egress is the cache proxy. Watch it try to reach HuggingFace directly and get blocked.",
-    command: "agent_to_hf",
-  },
-  {
-    id: "exploitgym-attack-control",
-    title: "Attack the shared-kernel proxy",
-    description:
-      "Fire the poisoned-artifact deserialization 0-day at <code class='guide-code'>proxy-control</code>. The RCE escapes to the node: host canary read, a stolen neighbor token, leaked DB credentials, and a pivot to HuggingFace.",
-    command: "attack control",
-  },
-  {
-    id: "exploitgym-falco-host",
-    title: "See the host-level detections",
-    description:
-      "Query Falco's host source. The escape shows up as CRITICAL / WARNING host events.",
-    command: "falco_alerts host",
-  },
-  {
-    id: "exploitgym-attack-edera",
-    title: "Attack the Edera-isolated proxy",
-    description:
-      "Fire the <em>identical</em> 0-day at <code class='guide-code'>proxy-edera</code>. The RCE still runs, but every step is contained - no canary, no neighbor token, no internet.",
-    command: "attack edera",
-  },
-  {
-    id: "exploitgym-falco-zone",
-    title: "See the containment in Falco",
-    description:
-      "Query Falco's zone source. The same activity is attributed to the Edera zone and confined within it - it never reached the host.",
-    command: "falco_alerts zone",
-  },
-];
-
 async function initTerminalDemo() {
 
   const app = document.querySelector<HTMLDivElement>("#app")!;
@@ -1213,28 +1012,14 @@ async function initTerminalDemo() {
         <div class="guide-header">
           <span class="drag-handle">⋮⋮</span>
           <div>
-            <div class="guide-title" id="guide-title">🧭 Edera Demo Guide</div>
+            <div class="guide-title" id="guide-title">🤖 Agent Sandbox + Edera</div>
             <div class="guide-subtitle" id="guide-subtitle">
-              <span class="desktop-only">Run each command below to walk through the isolation lifecycle</span>
+              <span class="desktop-only">Run each command below to run Kubernetes Agent Sandbox on the Edera runtime</span>
             </div>
           </div>
 
           <div id="guide-progress" class="guide-progress"></div>
 
-          <button
-            type="button"
-            class="hide-btn"
-            id="exploitgym-toggle-btn"
-            title="Swap this guide between the Edera walkthrough and the ExploitGym attacker demo"
-            style="border:1px solid rgba(0,229,212,.5);color:#00e5d4;"
-          >🕵️ Try the ExploitGym demo</button>
-          <button
-            type="button"
-            class="hide-btn"
-            id="agent-sandbox-toggle-btn"
-            title="Open the Agent Sandbox + Edera walkthrough"
-            style="border:1px solid rgba(184,255,60,.55);color:#b8ff3c;"
-          >🤖 Run Agent Sandbox on Edera</button>
           <button class="hide-btn" id="hide-guide-btn">Hide</button>
         </div>
 
@@ -1307,7 +1092,7 @@ async function initTerminalDemo() {
           <div style="width:64px;height:64px;margin:0 auto 20px;display:grid;place-items:center;border-radius:50%;background:#b8ff3c;color:#081716;font-size:32px;font-weight:800;">✓</div>
           <div style="margin-bottom:10px;color:#00e5d4;font-size:12px;font-weight:800;letter-spacing:.16em;">LAB COMPLETE</div>
           <h2 id="completion-title" style="margin:0 0 14px;color:#f8fffd;font-size:30px;">Thank you for completing the lab!</h2>
-          <p style="margin:0 0 28px;color:#a8cfca;line-height:1.6;">You've completed the Edera isolation walkthrough. Ready to try Edera for yourself?</p>
+          <p style="margin:0 0 28px;color:#a8cfca;line-height:1.6;">You've completed the Agent Sandbox + Edera runtime walkthrough. Ready to try Edera for yourself?</p>
           <div class="completion-actions">
             <button id="restart-demo-btn" type="button" class="completion-restart-btn">Start a new session</button>
             <a href="https://on.edera.dev" target="_blank" rel="noopener noreferrer" class="completion-license-link">Sign up for a free Edera license →</a>
@@ -1906,7 +1691,7 @@ vfio_pci`;
   const commandHistory: string[] = [];
   let historyIndex = -1;
   let completedDemoSteps = new Set<string>();
-  const REQUIRED_DEMO_STEP_IDS = PROTECT_DEMO_STEPS
+  const REQUIRED_DEMO_STEP_IDS = AGENT_SANDBOX_DEMO_STEPS
     .filter((step) => !step.optional)
     .map((step) => step.id);
 
@@ -2226,11 +2011,9 @@ const renderNodes = () => {
     renderProtectZones();
   };
   let selectedDemoStepIndex: number | null = null;
-  // Which walkthrough the guide panel is currently showing. The guide renderer
-  // reads `activeDemoSteps` rather than a fixed array so the ExploitGym toggle
-  // can swap the step set without touching the rest of the machinery.
-  let activeDemoMode: "edera" | "exploitgym" | "agent-sandbox" = "edera";
-  let activeDemoSteps: DemoStep[] = PROTECT_DEMO_STEPS;
+  // The guide is dedicated to the Agent Sandbox + Edera runtime workflow.
+  let activeDemoMode: "agent-sandbox" = "agent-sandbox";
+  let activeDemoSteps: DemoStep[] = AGENT_SANDBOX_DEMO_STEPS;
   const getNextDemoStepIndex = (): number => {
     const index = activeDemoSteps.findIndex(
       (step) => !completedDemoSteps.has(step.id),
@@ -2318,91 +2101,13 @@ const renderNodes = () => {
         nextIndex === -1 ? activeDemoSteps.length - 1 : nextIndex;
     }
     renderGuide();
-    // Only the Edera walkthrough awards a completion. The ExploitGym demo is
-    // just for exploration - no reward modal.
-    if (activeDemoMode === "edera" && !wasComplete && isDemoComplete()) {
+    // The Agent Sandbox walkthrough is the only guide and owns the completion modal.
+    if (activeDemoMode === "agent-sandbox" && !wasComplete && isDemoComplete()) {
       requestAnimationFrame(() => {
         showCompletionModal();
       });
     }
   };
-  // Swap the guide panel between the original Edera walkthrough, the
-  // ExploitGym attacker demo, and the Agent Sandbox + Edera walkthrough.
-  // Completed-step progress is intentionally preserved across modes.
-  const setDemoMode = (mode: "edera" | "exploitgym" | "agent-sandbox") => {
-    activeDemoMode = mode;
-    activeDemoSteps =
-      mode === "exploitgym"
-        ? EXPLOITGYM_DEMO_STEPS
-        : mode === "agent-sandbox"
-          ? AGENT_SANDBOX_DEMO_STEPS
-          : PROTECT_DEMO_STEPS;
-    selectedDemoStepIndex = null;
-
-    const titleEl = document.querySelector<HTMLDivElement>("#guide-title");
-    const subtitleEl =
-      document.querySelector<HTMLDivElement>("#guide-subtitle");
-    const exploitToggleEl = document.querySelector<HTMLButtonElement>(
-      "#exploitgym-toggle-btn",
-    );
-    const agentToggleEl = document.querySelector<HTMLButtonElement>(
-      "#agent-sandbox-toggle-btn",
-    );
-
-    if (titleEl) {
-      titleEl.innerText =
-        mode === "exploitgym"
-          ? "🕵️ ExploitGym Agent Demo"
-          : mode === "agent-sandbox"
-            ? "🤖 Agent Sandbox + Edera"
-            : "🧭 Edera Demo Guide";
-    }
-    if (subtitleEl) {
-      subtitleEl.innerText =
-        mode === "exploitgym"
-          ? "Walk a sandboxed agent's 0-day through a shared-kernel proxy, then watch Edera contain the exact same attack"
-          : mode === "agent-sandbox"
-            ? "Run Kubernetes Agent Sandbox on the Edera runtime: isolate, execute, warm, route, and connect an agent"
-            : "Run each command below to walk through the isolation lifecycle";
-    }
-    if (exploitToggleEl) {
-      exploitToggleEl.innerText =
-        mode === "exploitgym"
-          ? "← Back to Edera demo"
-          : "🕵️ Try the ExploitGym demo";
-      exploitToggleEl.classList.toggle("active", mode === "exploitgym");
-    }
-    if (agentToggleEl) {
-      agentToggleEl.innerText =
-        mode === "agent-sandbox"
-          ? "← Back to Edera demo"
-          : "🤖 Run Agent Sandbox on Edera";
-      agentToggleEl.classList.toggle("active", mode === "agent-sandbox");
-    }
-
-    renderGuide();
-  };
-
-  const exploitgymToggleBtn = document.querySelector<HTMLButtonElement>(
-    "#exploitgym-toggle-btn",
-  );
-  if (exploitgymToggleBtn) {
-    exploitgymToggleBtn.addEventListener("click", () => {
-      setDemoMode(activeDemoMode === "exploitgym" ? "edera" : "exploitgym");
-    });
-  }
-
-  const agentSandboxToggleBtn = document.querySelector<HTMLButtonElement>(
-    "#agent-sandbox-toggle-btn",
-  );
-  if (agentSandboxToggleBtn) {
-    agentSandboxToggleBtn.addEventListener("click", () => {
-      setDemoMode(
-        activeDemoMode === "agent-sandbox" ? "edera" : "agent-sandbox",
-      );
-    });
-  }
-
   guideStepList.addEventListener("click", (event) => {
     const target = event.target as HTMLElement;
     const button = target.closest<HTMLButtonElement>("button[data-step-index]");
@@ -3850,8 +3555,8 @@ const renderNodes = () => {
         </div>
 
         <div class="cli-help-tip">
-          Tip: use the Edera Demo Guide below the terminal to walk through
-          the isolation lifecycle step-by-step.
+          Tip: use the Agent Sandbox + Edera guide below the terminal to walk through
+          the runtime lifecycle step-by-step.
         </div>
       </div>
     `;
@@ -4003,8 +3708,8 @@ const renderNodes = () => {
         </div>
 
         <div class="cli-help-tip">
-          Tip: use the Edera Demo Guide below the terminal to walk through
-          the isolation lifecycle step-by-step.
+          Tip: use the Agent Sandbox + Edera guide below the terminal to walk through
+          the runtime lifecycle step-by-step.
         </div>
       </div>
     `;

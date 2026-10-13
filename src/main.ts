@@ -683,6 +683,223 @@ customRules:
         (proc.cmdline contains "http://" or proc.cmdline contains "https://")
 `;
 
+const AGENT_SANDBOX_VERSION = "v0.5.0rc1";
+
+const AGENT_SANDBOX_MANIFEST_YAML = `apiVersion: agents.x-k8s.io/v1beta1
+kind: Sandbox
+metadata:
+  name: my-sandbox
+  namespace: default
+spec:
+  podTemplate:
+    spec:
+      runtimeClassName: edera
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+      containers:
+      - name: python-sandbox
+        image: registry.k8s.io/agent-sandbox/python-runtime-sandbox:v0.1.0
+        imagePullPolicy: IfNotPresent
+        ports:
+        - containerPort: 8888
+        readinessProbe:
+          httpGet:
+            path: /
+            port: 8888
+          initialDelaySeconds: 0
+          periodSeconds: 1
+        resources:
+          requests:
+            cpu: "250m"
+            memory: "512Mi"
+          limits:
+            cpu: "500m"
+            memory: "1Gi"
+        securityContext:
+          capabilities:
+            drop: ["ALL"]
+      restartPolicy: Always`;
+
+const AGENT_SANDBOX_TEMPLATE_AND_POOL_YAML = `apiVersion: extensions.agents.x-k8s.io/v1beta1
+kind: SandboxTemplate
+metadata:
+  name: python-sandbox-edera-template
+  namespace: default
+spec:
+  podTemplate:
+    spec:
+      runtimeClassName: edera
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+      containers:
+      - name: python-sandbox
+        image: registry.k8s.io/agent-sandbox/python-runtime-sandbox:v0.1.0
+        imagePullPolicy: IfNotPresent
+        ports:
+        - containerPort: 8888
+        readinessProbe:
+          httpGet:
+            path: /
+            port: 8888
+        resources:
+          requests:
+            cpu: "250m"
+            memory: "512Mi"
+          limits:
+            cpu: "500m"
+            memory: "1Gi"
+        securityContext:
+          capabilities:
+            drop: ["ALL"]
+---
+apiVersion: extensions.agents.x-k8s.io/v1beta1
+kind: SandboxWarmPool
+metadata:
+  name: python-sandbox-pool
+  namespace: default
+spec:
+  replicas: 2
+  sandboxTemplateRef:
+    name: python-sandbox-edera-template`;
+
+const AGENT_SANDBOX_ROUTER_COMMAND = `kubectl apply -f https://raw.githubusercontent.com/kubernetes-sigs/agent-sandbox/${AGENT_SANDBOX_VERSION}/clients/python/agentic-sandbox-client/sandbox-router/sandbox_router.yaml`;
+
+const AGENT_SANDBOX_DEMO_STEPS: DemoStep[] = [
+  {
+    id: "agent-sandbox-version",
+    title: "Pin a v1beta1 Agent Sandbox release",
+    description:
+      "Use a release that serves the <code class='guide-code'>agents.x-k8s.io/v1beta1</code> API. This guide pins <code class='guide-code'>v0.5.0rc1</code> so the manifest and controller API stay aligned. Newer v1beta1-compatible releases can be substituted in a real cluster.",
+    command: `export AGENT_SANDBOX_VERSION="${AGENT_SANDBOX_VERSION}"`,
+  },
+  {
+    id: "agent-sandbox-install",
+    title: "Install the Agent Sandbox controller",
+    description:
+      `Install the Agent Sandbox controller and CRDs. The simulator accepts the pinned upstream release manifest. <a href="https://agent-sandbox.sigs.k8s.io/docs/" target="_blank" rel="noopener noreferrer">Read the Agent Sandbox docs →</a>`,
+    command: `kubectl apply -f https://github.com/kubernetes-sigs/agent-sandbox/releases/download/${AGENT_SANDBOX_VERSION}/manifest.yaml`,
+  },
+  {
+    id: "agent-sandbox-crd",
+    title: "Verify the Sandbox CRD",
+    description:
+      "Confirm that <code class='guide-code'>sandboxes.agents.x-k8s.io</code> is installed and serves <code class='guide-code'>v1beta1</code>.",
+    command: "kubectl get crd sandboxes.agents.x-k8s.io",
+  },
+  {
+    id: "agent-sandbox-controller",
+    title: "Wait for the controller",
+    description:
+      "Verify that the <code class='guide-code'>agent-sandbox-controller</code> Deployment is running in <code class='guide-code'>agent-sandbox-system</code>.",
+    command: "kubectl -n agent-sandbox-system rollout status deploy/agent-sandbox-controller",
+  },
+  {
+    id: "agent-sandbox-manifest",
+    title: "Inspect the Edera-backed Sandbox",
+    description:
+      "The important integration point is <code class='guide-code'>runtimeClassName: edera</code>. The sandbox also disables automatic service-account tokens, drops Linux capabilities, runs non-root, and gives the Python runtime explicit CPU and memory limits.",
+    command: "cat agent-sandbox/sandbox.yaml",
+  },
+  {
+    id: "agent-sandbox-apply",
+    title: "Create the Agent Sandbox",
+    description:
+      "Apply the Sandbox resource. Agent Sandbox hides the underlying StatefulSet, Service, and storage lifecycle behind the <code class='guide-code'>Sandbox</code> API.",
+    command: "kubectl apply -f agent-sandbox/sandbox.yaml",
+  },
+  {
+    id: "agent-sandbox-ready",
+    title: "Wait for the sandbox to become Ready",
+    description:
+      "Wait for the controller to report a Ready Sandbox. Because the pod uses the Edera RuntimeClass, its workload is placed in an Edera zone with a dedicated guest kernel.",
+    command: "kubectl wait --for=condition=Ready sandbox/my-sandbox --timeout=120s",
+  },
+  {
+    id: "agent-sandbox-inspect",
+    title: "Inspect the Sandbox and Pod",
+    description:
+      "List the Sandbox and its backing pod. Notice the <code class='guide-code'>edera</code> runtime and the stable Sandbox identity.",
+    command: "kubectl get sandbox,pods -o wide",
+  },
+  {
+    id: "agent-sandbox-exec",
+    title: "Execute Python inside the isolated sandbox",
+    description:
+      "Run code directly in the sandbox runtime. The execution happens inside the Edera zone rather than on the Kubernetes node's shared kernel.",
+    command: "kubectl exec -it my-sandbox -- python3 -c \"print(2+2)\"",
+  },
+  {
+    id: "agent-sandbox-kernel",
+    title: "Verify the dedicated Edera kernel",
+    description:
+      "Compare the kernel reported from inside the sandbox with the host. A different kernel is the clearest demonstration that the agent is not sharing the node kernel.",
+    command: "kubectl exec my-sandbox -- uname -r",
+  },
+  {
+    id: "agent-sandbox-warm-pool",
+    title: "Create an Edera warm pool",
+    description:
+      "Create a reusable <code class='guide-code'>SandboxTemplate</code> and a two-replica <code class='guide-code'>SandboxWarmPool</code>. Pre-warmed Edera zones reduce cold-start latency for agents at scale.",
+    command: "kubectl apply -f agent-sandbox/template-and-warm-pool.yaml",
+  },
+  {
+    id: "agent-sandbox-pool-list",
+    title: "Inspect the warm pool",
+    description:
+      "List the template, warm pool, Sandboxes, and backing pods. Each warm-pool pod uses <code class='guide-code'>runtimeClassName: edera</code>.",
+    command: "kubectl get sandboxtemplates,sandboxwarmpools,sandboxes,pods",
+  },
+  {
+    id: "agent-sandbox-router",
+    title: "Install the Sandbox Router",
+    description:
+      `VM-based runtimes should use the Sandbox Router rather than direct pod port-forwarding. The router selects the target sandbox using <code class='guide-code'>X-Sandbox-ID</code> and <code class='guide-code'>X-Sandbox-Port</code>.`,
+    command: AGENT_SANDBOX_ROUTER_COMMAND,
+  },
+  {
+    id: "agent-sandbox-api",
+    title: "Call the sandbox execution API",
+    description:
+      "Port-forward the Router Service, then send an execution request to the Python runtime. This is the same shape used by Agent Sandbox clients and agent orchestrators.",
+    command:
+      `kubectl port-forward svc/sandbox-router-svc 8080:8080 & curl -s http://localhost:8080/execute -H 'Content-Type: application/json' -H 'X-Sandbox-ID: my-sandbox' -H 'X-Sandbox-Port: 8888' -d '{"command":"python3 -c \\\"print(2+2)\\\""}'`,
+  },
+  {
+    id: "agent-sandbox-sdk",
+    title: "Connect an Agent Sandbox SDK",
+    description:
+      `The Python client is available as <code class='guide-code'>k8s-agent-sandbox</code>; the project also provides a Go client. From here an orchestrator can create/claim a sandbox and run commands through the Router. <a href="https://agent-sandbox.sigs.k8s.io/docs/python-client/" target="_blank" rel="noopener noreferrer">Python client docs →</a>`,
+    command: "pip install k8s-agent-sandbox",
+    optional: true,
+  },
+  {
+    id: "agent-sandbox-security-review",
+    title: "Review the agent security boundary",
+    description:
+      "Edera contains the compute environment: the agent gets its own kernel, filesystem, memory, and process space. That does not make credentials or data safe automatically, so keep credentials outside the agent and scope network access separately.",
+    command: "cat agent-sandbox/sandbox.yaml",
+    optional: true,
+  },
+  {
+    id: "agent-sandbox-next-steps",
+    title: "Plan production protections",
+    description:
+      `For production agents, layer controls around the Edera zone: use workload identity and attestation with SPIRE, scope file/device/service access with object capabilities, minimize tool calls, inject credentials outside the agent, and consider an in-zone sub-sandbox for especially risky tool calls. <a href="https://docs.edera.dev/technical-overview/security/reference-architecture/#ai-agent-isolation" target="_blank" rel="noopener noreferrer">Edera AI agent isolation reference architecture →</a>`,
+    command: "kubectl get runtimeclass edera",
+    optional: true,
+  },
+  {
+    id: "agent-sandbox-cleanup",
+    title: "Clean up the demo Sandbox",
+    description:
+      "Delete the example Sandbox when you are finished. The controller owns the underlying long-running workload lifecycle.",
+    command: "kubectl delete sandbox my-sandbox",
+    optional: true,
+  },
+];
+
 const PROTECT_DEMO_STEPS: DemoStep[] = [
   {
     id: "zone-launch",
@@ -1011,6 +1228,13 @@ async function initTerminalDemo() {
             title="Swap this guide between the Edera walkthrough and the ExploitGym attacker demo"
             style="border:1px solid rgba(0,229,212,.5);color:#00e5d4;"
           >🕵️ Try the ExploitGym demo</button>
+          <button
+            type="button"
+            class="hide-btn"
+            id="agent-sandbox-toggle-btn"
+            title="Open the Agent Sandbox + Edera walkthrough"
+            style="border:1px solid rgba(184,255,60,.55);color:#b8ff3c;"
+          >🤖 Run Agent Sandbox on Edera</button>
           <button class="hide-btn" id="hide-guide-btn">Hide</button>
         </div>
 
@@ -1191,6 +1415,8 @@ async function initTerminalDemo() {
     "/edera/runtimeclass-edera.yaml": RUNTIMECLASS_EDERA_YAML_CONTENT,
     "/edera/pod-hardened-vessel.yaml": HARDENED_VESSEL_YAML_CONTENT,
     "/edera/nginx-deployment.yaml": NGINX_DEPLOYMENT_YAML_CONTENT,
+    "/agent-sandbox/sandbox.yaml": AGENT_SANDBOX_MANIFEST_YAML,
+    "/agent-sandbox/template-and-warm-pool.yaml": AGENT_SANDBOX_TEMPLATE_AND_POOL_YAML,
 
     "/etc/falco/config.d/falco-edera-config.yaml": FALCO_EDERA_CONFIG_YAML,
     "/etc/falco/rules.d/falco-edera-rules.yaml": FALCO_EDERA_RULES_YAML,
@@ -1499,6 +1725,15 @@ vfio_pci`;
     ederaFalcoPluginLoaded = false;
     falcoLogLines = [];
     falcoStreamMode = null;
+    agentSandboxVersion = AGENT_SANDBOX_VERSION;
+    agentSandboxInstalled = false;
+    agentSandboxControllerReady = false;
+    agentSandboxCreated = false;
+    agentSandboxReady = false;
+    agentSandboxTemplateCreated = false;
+    agentSandboxWarmPoolCreated = false;
+    agentSandboxRouterInstalled = false;
+    agentSandboxRouterForwarded = false;
 
     closeCompletionModal();
     window.location.reload();
@@ -1515,6 +1750,16 @@ vfio_pci`;
   let falcoStreamMode: "node" | "helm" | null = null;
 
   const activeRuntimeClasses = new Set<string>();
+
+  let agentSandboxVersion = AGENT_SANDBOX_VERSION;
+  let agentSandboxInstalled = false;
+  let agentSandboxControllerReady = false;
+  let agentSandboxCreated = false;
+  let agentSandboxReady = false;
+  let agentSandboxTemplateCreated = false;
+  let agentSandboxWarmPoolCreated = false;
+  let agentSandboxRouterInstalled = false;
+  let agentSandboxRouterForwarded = false;
 
   // A pod's runtimeClassName is only "effective" once that RuntimeClass
   // actually exists in the cluster. Until it's created the pod can't be
@@ -1984,7 +2229,7 @@ const renderNodes = () => {
   // Which walkthrough the guide panel is currently showing. The guide renderer
   // reads `activeDemoSteps` rather than a fixed array so the ExploitGym toggle
   // can swap the step set without touching the rest of the machinery.
-  let activeDemoMode: "edera" | "exploitgym" = "edera";
+  let activeDemoMode: "edera" | "exploitgym" | "agent-sandbox" = "edera";
   let activeDemoSteps: DemoStep[] = PROTECT_DEMO_STEPS;
   const getNextDemoStepIndex = (): number => {
     const index = activeDemoSteps.findIndex(
@@ -2081,40 +2326,58 @@ const renderNodes = () => {
       });
     }
   };
-  // Swap the guide panel between the Edera walkthrough and the ExploitGym
-  // attacker demo. Completed-step progress is intentionally NOT cleared, so
-  // each demo remembers how far you got when you toggle back and forth.
-  const setDemoMode = (mode: "edera" | "exploitgym") => {
+  // Swap the guide panel between the original Edera walkthrough, the
+  // ExploitGym attacker demo, and the Agent Sandbox + Edera walkthrough.
+  // Completed-step progress is intentionally preserved across modes.
+  const setDemoMode = (mode: "edera" | "exploitgym" | "agent-sandbox") => {
     activeDemoMode = mode;
     activeDemoSteps =
-      mode === "exploitgym" ? EXPLOITGYM_DEMO_STEPS : PROTECT_DEMO_STEPS;
+      mode === "exploitgym"
+        ? EXPLOITGYM_DEMO_STEPS
+        : mode === "agent-sandbox"
+          ? AGENT_SANDBOX_DEMO_STEPS
+          : PROTECT_DEMO_STEPS;
     selectedDemoStepIndex = null;
 
     const titleEl = document.querySelector<HTMLDivElement>("#guide-title");
     const subtitleEl =
       document.querySelector<HTMLDivElement>("#guide-subtitle");
-    const toggleEl = document.querySelector<HTMLButtonElement>(
+    const exploitToggleEl = document.querySelector<HTMLButtonElement>(
       "#exploitgym-toggle-btn",
+    );
+    const agentToggleEl = document.querySelector<HTMLButtonElement>(
+      "#agent-sandbox-toggle-btn",
     );
 
     if (titleEl) {
       titleEl.innerText =
         mode === "exploitgym"
           ? "🕵️ ExploitGym Agent Demo"
-          : "🧭 Edera Demo Guide";
+          : mode === "agent-sandbox"
+            ? "🤖 Agent Sandbox + Edera"
+            : "🧭 Edera Demo Guide";
     }
     if (subtitleEl) {
       subtitleEl.innerText =
         mode === "exploitgym"
           ? "Walk a sandboxed agent's 0-day through a shared-kernel proxy, then watch Edera contain the exact same attack"
-          : "Run each command below to walk through the isolation lifecycle";
+          : mode === "agent-sandbox"
+            ? "Run Kubernetes Agent Sandbox on the Edera runtime: isolate, execute, warm, route, and connect an agent"
+            : "Run each command below to walk through the isolation lifecycle";
     }
-    if (toggleEl) {
-      toggleEl.innerText =
+    if (exploitToggleEl) {
+      exploitToggleEl.innerText =
         mode === "exploitgym"
           ? "← Back to Edera demo"
           : "🕵️ Try the ExploitGym demo";
-      toggleEl.classList.toggle("active", mode === "exploitgym");
+      exploitToggleEl.classList.toggle("active", mode === "exploitgym");
+    }
+    if (agentToggleEl) {
+      agentToggleEl.innerText =
+        mode === "agent-sandbox"
+          ? "← Back to Edera demo"
+          : "🤖 Run Agent Sandbox on Edera";
+      agentToggleEl.classList.toggle("active", mode === "agent-sandbox");
     }
 
     renderGuide();
@@ -2126,6 +2389,17 @@ const renderNodes = () => {
   if (exploitgymToggleBtn) {
     exploitgymToggleBtn.addEventListener("click", () => {
       setDemoMode(activeDemoMode === "exploitgym" ? "edera" : "exploitgym");
+    });
+  }
+
+  const agentSandboxToggleBtn = document.querySelector<HTMLButtonElement>(
+    "#agent-sandbox-toggle-btn",
+  );
+  if (agentSandboxToggleBtn) {
+    agentSandboxToggleBtn.addEventListener("click", () => {
+      setDemoMode(
+        activeDemoMode === "agent-sandbox" ? "edera" : "agent-sandbox",
+      );
     });
   }
 
@@ -3306,6 +3580,39 @@ const renderNodes = () => {
         </div>
 
         <div class="cli-help-section">
+          <div class="cli-help-section-title">AI Agent Sandbox</div>
+
+          <div class="cli-help-command">
+            <code>export AGENT_SANDBOX_VERSION=...</code>
+            <span>Pin the Agent Sandbox release used by the guide.</span>
+          </div>
+
+          <div class="cli-help-command">
+            <code>kubectl apply -f &lt;Agent Sandbox release manifest&gt;</code>
+            <span>Install the Agent Sandbox controller and CRDs.</span>
+          </div>
+
+          <div class="cli-help-command">
+            <code>kubectl get sandbox,pods</code>
+            <span>Inspect the Edera-backed Sandbox and its backing pod.</span>
+          </div>
+
+          <div class="cli-help-command">
+            <code>kubectl exec my-sandbox -- python3 -c "print(2+2)"</code>
+            <span>Execute Python inside the sandbox runtime.</span>
+          </div>
+
+          <div class="cli-help-command">
+            <code>kubectl exec my-sandbox -- uname -r</code>
+            <span>Verify the sandbox is using an Edera zone kernel.</span>
+          </div>
+
+          <div class="cli-help-command">
+            <code>kubectl port-forward svc/sandbox-router-svc 8080:8080</code>
+            <span>Expose the Agent Sandbox Router for SDK/API traffic.</span>
+          </div>
+
+        <div class="cli-help-section">
           <div class="cli-help-section-title">Edera</div>
 
           <div class="cli-help-command">
@@ -4434,6 +4741,336 @@ Kernel isolation: enabled</span>`);
   ): Promise<boolean> => {
     if (tokens[0] !== "kubectl") {
       return false;
+    }
+
+    // ---------------------------------------------------------------------
+    // Kubernetes Agent Sandbox + Edera walkthrough.
+    // These are simulator-only resources layered on the existing Kubernetes
+    // lab; the original pod/deployment/storage/Edera commands remain intact.
+    // ---------------------------------------------------------------------
+    if (tokens[1] === "apply" && tokens[2] === "-f") {
+      const requestedPath = tokens[3] || "";
+      const normalizedRequestedPath = requestedPath.replace(/^['"]|['"]$/g, "");
+      const releaseManifest =
+        normalizedRequestedPath.includes("kubernetes-sigs/agent-sandbox/releases/download/") &&
+        normalizedRequestedPath.endsWith("/manifest.yaml");
+
+      if (releaseManifest) {
+        const versionMatch = normalizedRequestedPath.match(
+          /releases\/download\/([^/]+)\/manifest\.yaml$/,
+        );
+        agentSandboxVersion = versionMatch?.[1] || agentSandboxVersion;
+        agentSandboxInstalled = true;
+        agentSandboxControllerReady = true;
+        addEvent(
+          "Normal",
+          "AgentSandboxInstalled",
+          "agent-sandbox-system",
+          `Agent Sandbox ${agentSandboxVersion} controller and v1beta1 CRDs installed`,
+        );
+        printHtml(
+          `<span style="color:#b8ff3c;">Agent Sandbox ${escapeHtml(agentSandboxVersion)} installed successfully.</span>`,
+        );
+        printHtml(
+          `<span style="color:#00e5d4;">Serving API: agents.x-k8s.io/v1beta1</span>`,
+        );
+        markDemoStepComplete("agent-sandbox-install");
+        return true;
+      }
+
+      if (
+        normalizedRequestedPath.includes("raw.githubusercontent.com/kubernetes-sigs/agent-sandbox/") &&
+        normalizedRequestedPath.includes("sandbox_router.yaml")
+      ) {
+        agentSandboxRouterInstalled = true;
+        addEvent(
+          "Normal",
+          "SandboxRouterInstalled",
+          "service/sandbox-router-svc",
+          "Sandbox Router installed for header-based sandbox routing",
+        );
+        printHtml(
+          `<span style="color:#b8ff3c;">sandbox-router installed.</span>`,
+        );
+        markDemoStepComplete("agent-sandbox-router");
+        return true;
+      }
+
+      if (normalizedRequestedPath.endsWith("agent-sandbox/sandbox.yaml")) {
+        if (!agentSandboxInstalled) {
+          printHtml(
+            `<span style="color:#ff7373;">Error: install the Agent Sandbox controller first.</span>`,
+          );
+          return true;
+        }
+        if (!agentSandboxCreated) {
+          agentSandboxCreated = true;
+          agentSandboxReady = false;
+          pods.push({
+            name: "my-sandbox",
+            namespace: "default",
+            status: "Pending",
+            age: "1s",
+            image: "registry.k8s.io/agent-sandbox/python-runtime-sandbox:v0.1.0",
+            ip: "<none>",
+            node: "<none>",
+            labels: { "agents.x-k8s.io/sandbox": "my-sandbox" },
+            runtimeClassName: "edera",
+          });
+          addEvent(
+            "Normal",
+            "SandboxCreated",
+            "sandbox/my-sandbox",
+            "Sandbox created; controller is creating the long-running Edera-backed pod",
+          );
+          printHtml(
+            `<span style="color:#b8ff3c;">sandbox.agents.x-k8s.io/my-sandbox created</span>`,
+          );
+        } else {
+          printHtml(
+            `<span style="color:#a8cfca;">sandbox.agents.x-k8s.io/my-sandbox unchanged</span>`,
+          );
+        }
+        updateDashboard();
+        markDemoStepComplete("agent-sandbox-apply");
+        return true;
+      }
+
+      if (normalizedRequestedPath.endsWith("agent-sandbox/template-and-warm-pool.yaml")) {
+        if (!agentSandboxInstalled) {
+          printHtml(
+            `<span style="color:#ff7373;">Error: install the Agent Sandbox controller first.</span>`,
+          );
+          return true;
+        }
+        agentSandboxTemplateCreated = true;
+        agentSandboxWarmPoolCreated = true;
+        const poolNames = ["python-sandbox-pool-a1b2c", "python-sandbox-pool-d3e4f"];
+        for (const name of poolNames) {
+          if (!pods.some((pod) => pod.name === name)) {
+            pods.push({
+              name,
+              namespace: "default",
+              status: "Running",
+              age: "2s",
+              image: "registry.k8s.io/agent-sandbox/python-runtime-sandbox:v0.1.0",
+              ip: name.endsWith("a1b2c") ? "10.244.0.41" : "10.244.0.42",
+              node: name.endsWith("a1b2c") ? "node-2" : "node-3",
+              labels: { "agents.x-k8s.io/sandbox-template": "python-sandbox-edera-template" },
+              runtimeClassName: "edera",
+            });
+          }
+        }
+        addEvent(
+          "Normal",
+          "WarmPoolReady",
+          "sandboxwarmpool/python-sandbox-pool",
+          "Two pre-warmed Python sandboxes are running with runtimeClassName=edera",
+        );
+        printHtml(
+          `<span style="color:#b8ff3c;">sandboxtemplate/python-sandbox-edera-template created</span>`,
+        );
+        printHtml(
+          `<span style="color:#b8ff3c;">sandboxwarmpool/python-sandbox-pool created (2 replicas)</span>`,
+        );
+        updateDashboard();
+        markDemoStepComplete("agent-sandbox-warm-pool");
+        return true;
+      }
+    }
+
+    if (tokens[1] === "get") {
+      const getArgs = tokens.slice(2);
+      const getJoined = getArgs.join(" ");
+
+      if (getJoined.includes("crd") && getJoined.includes("sandboxes.agents.x-k8s.io")) {
+        if (!agentSandboxInstalled) {
+          printHtml(
+            `<span style="color:#ff7373;">Error from server (NotFound): customresourcedefinitions.apiextensions.k8s.io "sandboxes.agents.x-k8s.io" not found</span>`,
+          );
+          return true;
+        }
+        printPre(
+          `<span style="color:#dff7f0;">NAME                         CREATED AT</span>\n` +
+          `<span style="color:#b8ff3c;">sandboxes.agents.x-k8s.io   1m</span>\n\n` +
+          `<span style="color:#00e5d4;">v1beta1 served=true</span>`,
+        );
+        markDemoStepComplete("agent-sandbox-crd");
+        return true;
+      }
+
+      if (getJoined.includes("runtimeclass") && getJoined.includes("edera")) {
+        // Fall through to the existing RuntimeClass renderer.
+      }
+
+      if (getJoined.includes("sandboxtemplates,sandboxwarmpools,sandboxes,pods")) {
+        printPre(
+          `<span style="color:#dff7f0;">NAME                                      TYPE</span>\n` +
+          `<span style="color:#b8ff3c;">python-sandbox-edera-template             SandboxTemplate</span>\n` +
+          `<span style="color:#b8ff3c;">python-sandbox-pool                      SandboxWarmPool</span>\n` +
+          `<span style="color:#b8ff3c;">my-sandbox                                Sandbox</span>\n` +
+          `<span style="color:#b8ff3c;">python-sandbox-pool-a1b2c                Pod (edera)</span>\n` +
+          `<span style="color:#b8ff3c;">python-sandbox-pool-d3e4f                Pod (edera)</span>`,
+        );
+        markDemoStepComplete("agent-sandbox-pool-list");
+        return true;
+      }
+
+      if (getJoined.includes("sandbox,pods") || getJoined.includes("sandboxes,pods")) {
+        if (!agentSandboxCreated) {
+          printHtml(`<span style="color:#a8cfca;">No resources found.</span>`);
+          return true;
+        }
+        const sandboxPod = pods.find((pod) => pod.name === "my-sandbox");
+        printPre(
+          `<span style="color:#dff7f0;">NAME         READY   RUNTIME   STATUS    KERNEL</span>\n` +
+          `<span style="color:#b8ff3c;">my-sandbox   ${agentSandboxReady ? "True " : "False"}    edera     ${agentSandboxReady ? "Ready" : "Pending"}   ${agentSandboxReady ? "6.18.34-edera-zone" : "<pending>"}</span>\n\n` +
+          `<span style="color:#dff7f0;">POD          STATUS    RUNTIME   NODE</span>\n` +
+          `<span style="color:#b8ff3c;">${sandboxPod?.name || "my-sandbox"}   ${sandboxPod?.status || "Pending"}   edera     ${sandboxPod?.node || "<none>"}</span>`,
+        );
+        markDemoStepComplete("agent-sandbox-inspect");
+        return true;
+      }
+
+      if (getJoined.includes("sandboxtemplates") || getJoined.includes("sandboxwarmpools")) {
+        if (agentSandboxWarmPoolCreated) {
+          printPre(
+            `<span style="color:#dff7f0;">NAME                               READY</span>\n` +
+            `<span style="color:#b8ff3c;">python-sandbox-edera-template     True</span>\n` +
+            `<span style="color:#b8ff3c;">python-sandbox-pool               2/2</span>`,
+          );
+          markDemoStepComplete("agent-sandbox-pool-list");
+        } else {
+          printHtml(`<span style="color:#a8cfca;">No resources found.</span>`);
+        }
+        return true;
+      }
+
+      if (getJoined.includes("sandbox") && !getJoined.includes("sandboxes.agents")) {
+        if (!agentSandboxCreated) {
+          printHtml(`<span style="color:#a8cfca;">No resources found.</span>`);
+          return true;
+        }
+        printPre(
+          `<span style="color:#dff7f0;">NAME         READY   AGE</span>\n` +
+          `<span style="color:#b8ff3c;">my-sandbox   ${agentSandboxReady ? "True" : "False"}    1m</span>`,
+        );
+        markDemoStepComplete("agent-sandbox-inspect");
+        return true;
+      }
+
+      if (getJoined.includes("pods") && agentSandboxCreated && tokens.includes("-o") === false) {
+        // Let the existing pod renderer handle normal `kubectl get pods` output.
+      }
+    }
+
+    if (
+      tokens[1] === "-n" &&
+      tokens[2] === "agent-sandbox-system" &&
+      tokens[3] === "rollout" &&
+      tokens[4] === "status" &&
+      tokens[5] === "deploy/agent-sandbox-controller"
+    ) {
+      if (!agentSandboxInstalled) {
+        printHtml(
+          `<span style="color:#ff7373;">Error from server (NotFound): deployments.apps "agent-sandbox-controller" not found</span>`,
+        );
+        return true;
+      }
+      agentSandboxControllerReady = true;
+      printHtml(
+        `<span style="color:#b8ff3c;">deployment "agent-sandbox-controller" successfully rolled out</span>`,
+      );
+      markDemoStepComplete("agent-sandbox-controller");
+      return true;
+    }
+
+    if (tokens[1] === "wait") {
+      const sandboxTarget = tokens.find((token) => token.startsWith("sandbox/"));
+      if (sandboxTarget === "sandbox/my-sandbox") {
+        if (!agentSandboxCreated) {
+          printHtml(`<span style="color:#ff7373;">Error from server (NotFound): sandbox "my-sandbox" not found</span>`);
+          return true;
+        }
+        agentSandboxReady = true;
+        const sandboxPod = pods.find((pod) => pod.name === "my-sandbox");
+        if (sandboxPod) {
+          sandboxPod.status = "Running";
+          sandboxPod.node = "node-2";
+          sandboxPod.ip = "10.244.0.31";
+        }
+        addEvent(
+          "Normal",
+          "SandboxReady",
+          "sandbox/my-sandbox",
+          "Agent Sandbox is Ready inside an Edera zone with a dedicated kernel",
+        );
+        printHtml(
+          `<span style="color:#b8ff3c;">sandbox/my-sandbox condition met</span>`,
+        );
+        updateDashboard();
+        markDemoStepComplete("agent-sandbox-ready");
+        return true;
+      }
+    }
+
+    if (tokens[1] === "exec") {
+      const podName = tokens[2];
+      if (podName === "my-sandbox") {
+        if (!agentSandboxReady) {
+          printHtml(`<span style="color:#ff7373;">Error: sandbox "my-sandbox" is not Ready.</span>`);
+          return true;
+        }
+        const commandIndex = tokens.indexOf("--");
+        const execCommand = commandIndex >= 0 ? tokens.slice(commandIndex + 1) : tokens.slice(3);
+        const commandText = execCommand.join(" ");
+
+        if (/uname\s+-r/.test(commandText)) {
+          printPre(`<span style="color:#b8ff3c;">6.18.34-edera-zone</span>`);
+          addEvent("Normal", "SandboxKernelVerified", "sandbox/my-sandbox", "Sandbox reports its dedicated Edera zone kernel");
+          markDemoStepComplete("agent-sandbox-kernel");
+        } else if (/python3\s+-c/.test(commandText) && /2\s*\+\s*2/.test(commandText)) {
+          printPre(`<span style="color:#b8ff3c;">4</span>`);
+          addEvent("Normal", "SandboxCommandComplete", "sandbox/my-sandbox", "Python command executed inside the Edera-backed Agent Sandbox");
+          markDemoStepComplete("agent-sandbox-exec");
+        } else {
+          printHtml(`<span style="color:#dff7f0;">Executed inside my-sandbox: ${escapeHtml(commandText || "<shell>")}</span>`);
+        }
+        return true;
+      }
+    }
+
+    if (tokens[1] === "port-forward" && tokens[2] === "svc/sandbox-router-svc") {
+      if (!agentSandboxRouterInstalled) {
+        printHtml(`<span style="color:#ff7373;">Error: service "sandbox-router-svc" not found. Install the Sandbox Router first.</span>`);
+        return true;
+      }
+      agentSandboxRouterForwarded = true;
+      printHtml(`<span style="color:#b8ff3c;">Forwarding from 127.0.0.1:8080 -> 8080</span>`);
+      printHtml(`<span style="color:#00e5d4;">Use X-Sandbox-ID and X-Sandbox-Port to address a sandbox.</span>`);
+      markDemoStepComplete("agent-sandbox-api");
+      if (/\bcurl\b.*localhost:8080\/execute/.test(rawCmd) && agentSandboxReady) {
+        printPre(`<span style="color:#b8ff3c;">{\"stdout\":\"4\n\",\"stderr\":\"\",\"exit_code\":0}</span>`);
+        addEvent(
+          "Normal",
+          "SandboxApiExecution",
+          "sandbox/my-sandbox",
+          "Router executed the Python command in the Edera-backed sandbox",
+        );
+      }
+      return true;
+    }
+
+    if (tokens[1] === "delete" && tokens[2] === "sandbox" && tokens[3] === "my-sandbox") {
+      const index = pods.findIndex((pod) => pod.name === "my-sandbox");
+      if (index >= 0) pods.splice(index, 1);
+      agentSandboxCreated = false;
+      agentSandboxReady = false;
+      addEvent("Normal", "SandboxDeleted", "sandbox/my-sandbox", "Agent Sandbox deleted");
+      printHtml(`<span style="color:#b8ff3c;">sandbox.agents.x-k8s.io/my-sandbox deleted</span>`);
+      updateDashboard();
+      markDemoStepComplete("agent-sandbox-cleanup");
+      return true;
     }
     if (tokens[1] === "run") {
       const podName = tokens[2];
@@ -5730,6 +6367,9 @@ Kernel isolation: enabled</span>`);
         if (activeRuntimeClasses.has("edera")) {
           markDemoStepComplete("edera-runtimeclass-list");
         }
+        if (activeDemoMode === "agent-sandbox" && activeRuntimeClasses.has("edera")) {
+          markDemoStepComplete("agent-sandbox-next-steps");
+        }
 
         return true;
       }
@@ -6762,6 +7402,23 @@ Kernel isolation: enabled</span>`);
           markDemoStepComplete("gpu-vfio-load");
           return;
         }
+        if (tokens[0] === "export") {
+          const assignment = tokens[1] || "";
+          const match = assignment.match(/^AGENT_SANDBOX_VERSION=(.+)$/);
+          if (match) {
+            agentSandboxVersion = match[1].replace(/^['"]|['"]$/g, "");
+            printHtml(
+              `<span style="color:#b8ff3c;">AGENT_SANDBOX_VERSION=${escapeHtml(agentSandboxVersion)}</span>`,
+            );
+            markDemoStepComplete("agent-sandbox-version");
+            return;
+          }
+          printHtml(
+            `<span style="color:#ff7373;">export: this simulator supports AGENT_SANDBOX_VERSION only.</span>`,
+          );
+          return;
+        }
+
         if (tokens[0] === "pwd") {
           printHtml(
             `<span style="color:#dff7f0;">${escapeHtml(
@@ -7084,6 +7741,12 @@ Kernel isolation: enabled</span>`);
 
             if (manifest) {
               printPre(escapeHtml(manifest));
+              if (manifestPath.endsWith("/agent-sandbox/sandbox.yaml")) {
+                markDemoStepComplete("agent-sandbox-manifest");
+              }
+              if (manifestPath.endsWith("/agent-sandbox/template-and-warm-pool.yaml")) {
+                markDemoStepComplete("agent-sandbox-warm-pool");
+              }
             } else {
               printHtml(
                 `<span style="color:#ff7373;">cat: ${escapeHtml(
@@ -7095,6 +7758,17 @@ Kernel isolation: enabled</span>`);
 
           return;
         }
+        if (
+          tokens[0] === "pip" &&
+          tokens[1] === "install" &&
+          tokens.includes("k8s-agent-sandbox")
+        ) {
+          printHtml(`<span style="color:#b8ff3c;">Successfully installed k8s-agent-sandbox (simulated)</span>`);
+          printHtml(`<span style="color:#00e5d4;">Python SDK ready to use the Sandbox Router.</span>`);
+          markDemoStepComplete("agent-sandbox-sdk");
+          return;
+        }
+
         if (tokens[0] === "falco") {
           const debug = rawCmd.includes('log_level=debug');
 
@@ -7226,6 +7900,31 @@ falco-edera-node-7d8f9                   1/1     Running   0          2m</span>`
           const url = rawCmd
             .replace(/^curl\s+/, "")
             .trim();
+
+          // Agent Sandbox Router execution endpoint. The real router uses
+          // X-Sandbox-ID / X-Sandbox-Port to select a sandbox, avoiding direct
+          // pod port-forwarding when the runtime is VM-based.
+          if (
+            /localhost:8080\/execute/.test(rawCmd) &&
+            /X-Sandbox-ID:\s*['"]?my-sandbox/.test(rawCmd) &&
+            agentSandboxRouterInstalled &&
+            agentSandboxRouterForwarded &&
+            agentSandboxReady
+          ) {
+            const commandMatch = rawCmd.match(/"command"\s*:\s*"([^"]*)"/);
+            const requestedCommand = commandMatch?.[1] || "python3 -c \\\"print(2+2)\\\"";
+            printPre(
+              `<span style="color:#b8ff3c;">{"stdout":"4\\n","stderr":"","exit_code":0}</span>`,
+            );
+            addEvent(
+              "Normal",
+              "SandboxApiExecution",
+              "sandbox/my-sandbox",
+              `Router executed ${requestedCommand} in the Edera-backed sandbox`,
+            );
+            markDemoStepComplete("agent-sandbox-api");
+            return;
+          }
 
           addEvent(
             "Info",

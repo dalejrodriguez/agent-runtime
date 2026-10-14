@@ -1581,43 +1581,6 @@ vfio_pci`;
       node: "node-2",
       labels: { app: "demo" },
     },
-    // ExploitGym breakout scenario pods. These are real cluster state so they
-    // appear in `kubectl get pods -A`, `-n exploitgym`, and the Active Pods
-    // panel. The two proxies are identical except for runtimeClassName:
-    // proxy-control shares the host kernel, proxy-edera runs in an Edera zone.
-    // The `variant` label is what the ExploitGym custom-columns query reads as
-    // ROLE; the absence of runtimeClassName/variant renders as <none>.
-    {
-      name: "agent",
-      namespace: "exploitgym",
-      status: "Running",
-      age: "6m",
-      image: "exploitgym/agent:1.0",
-      ip: "10.244.0.21",
-      node: "node-1",
-      labels: { app: "agent" },
-    },
-    {
-      name: "proxy-control",
-      namespace: "exploitgym",
-      status: "Running",
-      age: "6m",
-      image: "exploitgym/cache-proxy:1.0",
-      ip: "10.244.0.22",
-      node: "node-1",
-      labels: { app: "cache-proxy", variant: "control" },
-    },
-    {
-      name: "proxy-edera",
-      namespace: "exploitgym",
-      status: "Pending",
-      age: "6m",
-      image: "exploitgym/cache-proxy:1.0",
-      ip: "<none>",
-      node: "<none>",
-      labels: { app: "cache-proxy", variant: "edera" },
-      runtimeClassName: "edera",
-    },
   ];
 
   let nodes: LocalNode[] = [
@@ -4720,14 +4683,24 @@ Kernel isolation: enabled</span>`);
     }
 
     if (tokens[1] === "exec") {
-      const podName = tokens[2];
+      // The terminal tokenizer intentionally keeps quoted arguments together,
+      // but kubectl exec commonly appears in both forms:
+      //   kubectl exec my-sandbox -- ...
+      //   kubectl exec -it my-sandbox -- ...
+      // Find the sandbox by name rather than assuming it is tokens[2].
+      const podNameIndex = tokens.findIndex((token, index) => index >= 2 && token === "my-sandbox");
+      const podName = podNameIndex >= 0 ? tokens[podNameIndex] : tokens[2];
       if (podName === "my-sandbox") {
         if (!agentSandboxReady) {
           printHtml(`<span style="color:#ff7373;">Error: sandbox "my-sandbox" is not Ready.</span>`);
           return true;
         }
+
         const commandIndex = tokens.indexOf("--");
-        const execCommand = commandIndex >= 0 ? tokens.slice(commandIndex + 1) : tokens.slice(3);
+        const execCommand =
+          commandIndex >= 0
+            ? tokens.slice(commandIndex + 1)
+            : tokens.slice(podNameIndex >= 0 ? podNameIndex + 1 : 3);
         const commandText = execCommand.join(" ");
 
         if (/uname\s+-r/.test(commandText)) {

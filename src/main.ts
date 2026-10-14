@@ -1781,6 +1781,80 @@ vfio_pci`;
     );
   };
 
+  type TerminalTableCell =
+    | string
+    | {
+        text: string;
+        color?: string;
+        bold?: boolean;
+      };
+
+  const formatTerminalTable = (
+    headers: string[],
+    rows: TerminalTableCell[][],
+    options: {
+      minWidths?: number[];
+      divider?: boolean;
+    } = {},
+  ): string => {
+    const minWidths = options.minWidths || [];
+    const divider = options.divider ?? true;
+
+    const getText = (cell: TerminalTableCell): string =>
+      typeof cell === "string" ? cell : cell.text;
+
+    const widths = headers.map((header, index) => {
+      const widest = Math.max(
+        header.length,
+        ...rows.map((row) => getText(row[index] ?? "").length),
+      );
+      return Math.max(minWidths[index] || 0, widest + 2);
+    });
+
+    const renderCell = (cell: TerminalTableCell, width: number): string => {
+      const text = getText(cell);
+      const padded = text.padEnd(width);
+
+      if (typeof cell === "string") {
+        return escapeHtml(padded);
+      }
+
+      const styles: string[] = [];
+      if (cell.color) styles.push(`color:${cell.color}`);
+      if (cell.bold) styles.push("font-weight:700");
+      const style = styles.length ? ` style="${styles.join(";")}"` : "";
+      return `<span${style}>${escapeHtml(padded)}</span>`;
+    };
+
+    const renderRow = (row: TerminalTableCell[]): string =>
+      row
+        .map((cell, index) => renderCell(cell ?? "", widths[index]))
+        .join("")
+        .trimEnd();
+
+    const output: string[] = [];
+    output.push(
+      `<span style="color:#dff7f0;font-weight:700;">${headers
+        .map((header, index) => escapeHtml(header.padEnd(widths[index])))
+        .join("")
+        .trimEnd()}</span>`,
+    );
+
+    if (divider) {
+      output.push(
+        `<span style="color:#08736d;">${"─".repeat(
+          Math.max(1, widths.reduce((sum, width) => sum + width, 0) - 2),
+        )}</span>`,
+      );
+    }
+
+    for (const row of rows) {
+      output.push(renderRow(row));
+    }
+
+    return output.join("\n");
+  };
+
   const addEvent = (
     type: "Normal" | "Warning" | "Info",
     reason: string,
@@ -4656,10 +4730,34 @@ Kernel isolation: enabled</span>`);
         tokens.includes("-A")
       ) {
         printPre(
-          `<span style="color:#dff7f0;">NAMESPACE          NAME                         DESIRED   CURRENT   READY   UP-TO-DATE   AVAILABLE   NODE SELECTOR   AGE</span>\n` +
-          `<span style="color:#b8ff3c;">edera-runtime      ${EDERA_RUNTIME_OCAP_DAEMONSET.padEnd(28)}2         2         2       2            2           &lt;none&gt;          10m</span>\n` +
-          `<span style="color:#dff7f0;">kube-system        kindnet                      3         3         3       3            3           kubernetes.io/os=linux   10m</span>\n` +
-          `<span style="color:#dff7f0;">kube-system        kube-proxy                    3         3         3       3            3           kubernetes.io/os=linux   10m</span>`,
+          formatTerminalTable(
+            [
+              "NAMESPACE",
+              "NAME",
+              "DESIRED",
+              "CURRENT",
+              "READY",
+              "UP-TO-DATE",
+              "AVAILABLE",
+              "NODE SELECTOR",
+              "AGE",
+            ],
+            [
+              [
+                "edera-runtime",
+                { text: EDERA_RUNTIME_OCAP_DAEMONSET, color: "#b8ff3c" },
+                "2", "2", "2", "2", "2", "<none>", "10m",
+              ],
+              [
+                "kube-system", "kindnet", "3", "3", "3", "3", "3",
+                "kubernetes.io/os=linux", "10m",
+              ],
+              [
+                "kube-system", "kube-proxy", "3", "3", "3", "3", "3",
+                "kubernetes.io/os=linux", "10m",
+              ],
+            ],
+          ),
         );
         markDemoStepComplete("edera-ocap-daemonset");
         return true;
@@ -4671,10 +4769,14 @@ Kernel isolation: enabled</span>`);
         tokens[tokens.indexOf("-n") + 1] === EDERA_RUNTIME_NAMESPACE
       ) {
         printPre(
-          `<span style="color:#dff7f0;">NAME                                      READY   STATUS    RESTARTS   AGE</span>\n` +
-          `<span style="color:#b8ff3c;">edera-runtime-controller-manager-646ddcbfbb-p656l   1/1     Running   0          10m</span>\n` +
-          `<span style="color:#b8ff3c;">edera-runtime-ocap-proxy-gn8g7                    3/3     Running   0          3m</span>\n` +
-          `<span style="color:#b8ff3c;">edera-runtime-ocap-proxy-gtvf9                    3/3     Running   0          3m</span>`,
+          formatTerminalTable(
+            ["NAME", "READY", "STATUS", "RESTARTS", "AGE"],
+            [
+              [{ text: "edera-runtime-controller-manager-646ddcbfbb-p656l", color: "#b8ff3c" }, "1/1", "Running", "0", "10m"],
+              [{ text: "edera-runtime-ocap-proxy-gn8g7", color: "#b8ff3c" }, "3/3", "Running", "0", "3m"],
+              [{ text: "edera-runtime-ocap-proxy-gtvf9", color: "#b8ff3c" }, "3/3", "Running", "0", "3m"],
+            ],
+          ),
         );
         markDemoStepComplete("edera-ocap-pods");
         return true;
@@ -4688,9 +4790,11 @@ Kernel isolation: enabled</span>`);
           return true;
         }
         printPre(
-          `<span style="color:#dff7f0;">NAME                         CREATED AT</span>\n` +
-          `<span style="color:#b8ff3c;">sandboxes.agents.x-k8s.io   1m</span>\n\n` +
-          `<span style="color:#00e5d4;">v1beta1 served=true</span>`,
+          formatTerminalTable(
+            ["NAME", "CREATED AT"],
+            [["sandboxes.agents.x-k8s.io", { text: "1m", color: "#b8ff3c" }]],
+          ) +
+            `\n\n<span style="color:#00e5d4;">v1beta1 served=true</span>`,
         );
         markDemoStepComplete("agent-sandbox-crd");
         return true;
@@ -4702,12 +4806,16 @@ Kernel isolation: enabled</span>`);
 
       if (getJoined.includes("sandboxtemplates,sandboxwarmpools,sandboxes,pods")) {
         printPre(
-          `<span style="color:#dff7f0;">NAME                                      TYPE</span>\n` +
-          `<span style="color:#b8ff3c;">python-sandbox-edera-template             SandboxTemplate</span>\n` +
-          `<span style="color:#b8ff3c;">python-sandbox-pool                      SandboxWarmPool</span>\n` +
-          `<span style="color:#b8ff3c;">my-sandbox                                Sandbox</span>\n` +
-          `<span style="color:#b8ff3c;">python-sandbox-pool-a1b2c                Pod (edera)</span>\n` +
-          `<span style="color:#b8ff3c;">python-sandbox-pool-d3e4f                Pod (edera)</span>`,
+          formatTerminalTable(
+            ["NAME", "TYPE"],
+            [
+              [{ text: "python-sandbox-edera-template", color: "#b8ff3c" }, "SandboxTemplate"],
+              [{ text: "python-sandbox-pool", color: "#b8ff3c" }, "SandboxWarmPool"],
+              [{ text: "my-sandbox", color: "#b8ff3c" }, "Sandbox"],
+              [{ text: "python-sandbox-pool-a1b2c", color: "#b8ff3c" }, "Pod (edera)"],
+              [{ text: "python-sandbox-pool-d3e4f", color: "#b8ff3c" }, "Pod (edera)"],
+            ],
+          ),
         );
         markDemoStepComplete("agent-sandbox-pool-list");
         return true;
@@ -4720,10 +4828,26 @@ Kernel isolation: enabled</span>`);
         }
         const sandboxPod = pods.find((pod) => pod.name === "my-sandbox");
         printPre(
-          `<span style="color:#dff7f0;">NAME         READY   RUNTIME   STATUS    KERNEL</span>\n` +
-          `<span style="color:#b8ff3c;">my-sandbox   ${agentSandboxReady ? "True " : "False"}    edera     ${agentSandboxReady ? "Ready" : "Pending"}   ${agentSandboxReady ? "6.18.34-edera-zone" : "<pending>"}</span>\n\n` +
-          `<span style="color:#dff7f0;">POD          STATUS    RUNTIME   NODE</span>\n` +
-          `<span style="color:#b8ff3c;">${sandboxPod?.name || "my-sandbox"}   ${sandboxPod?.status || "Pending"}   edera     ${sandboxPod?.node || "<none>"}</span>`,
+          formatTerminalTable(
+            ["NAME", "READY", "RUNTIME", "STATUS", "KERNEL"],
+            [[
+              { text: "my-sandbox", color: "#b8ff3c" },
+              agentSandboxReady ? "True" : "False",
+              "edera",
+              agentSandboxReady ? "Ready" : "Pending",
+              agentSandboxReady ? "6.18.34-edera-zone" : "<pending>",
+            ]],
+          ) +
+            `\n\n` +
+            formatTerminalTable(
+              ["POD", "STATUS", "RUNTIME", "NODE"],
+              [[
+                { text: sandboxPod?.name || "my-sandbox", color: "#b8ff3c" },
+                sandboxPod?.status || "Pending",
+                "edera",
+                sandboxPod?.node || "<none>",
+              ]],
+            ),
         );
         markDemoStepComplete("agent-sandbox-inspect");
         return true;
@@ -4732,9 +4856,13 @@ Kernel isolation: enabled</span>`);
       if (getJoined.includes("sandboxtemplates") || getJoined.includes("sandboxwarmpools")) {
         if (agentSandboxWarmPoolCreated) {
           printPre(
-            `<span style="color:#dff7f0;">NAME                               READY</span>\n` +
-            `<span style="color:#b8ff3c;">python-sandbox-edera-template     True</span>\n` +
-            `<span style="color:#b8ff3c;">python-sandbox-pool               2/2</span>`,
+            formatTerminalTable(
+              ["NAME", "READY"],
+              [
+                [{ text: "python-sandbox-edera-template", color: "#b8ff3c" }, "True"],
+                [{ text: "python-sandbox-pool", color: "#b8ff3c" }, "2/2"],
+              ],
+            ),
           );
           markDemoStepComplete("agent-sandbox-pool-list");
         } else {
@@ -4749,8 +4877,14 @@ Kernel isolation: enabled</span>`);
           return true;
         }
         printPre(
-          `<span style="color:#dff7f0;">NAME         READY   AGE</span>\n` +
-          `<span style="color:#b8ff3c;">my-sandbox   ${agentSandboxReady ? "True" : "False"}    1m</span>`,
+          formatTerminalTable(
+            ["NAME", "READY", "AGE"],
+            [[
+              { text: "my-sandbox", color: "#b8ff3c" },
+              agentSandboxReady ? "True" : "False",
+              "1m",
+            ]],
+          ),
         );
         markDemoStepComplete("agent-sandbox-inspect");
         return true;
@@ -6120,56 +6254,74 @@ Kernel isolation: enabled</span>`);
 
       if (resource === "pvc" || resource === "pvcs" || resource === "persistentvolumeclaims") {
         if (persistentVolumeClaims.length === 0) { printHtml(`<span style="color:#a8cfca;">No resources found.</span>`); return true; }
-        let output = `<span style="color:#00e5d4;font-weight:700;">NAME                 STATUS    VOLUME              CAPACITY   ACCESS MODES   VOLUME MODE   STORAGECLASS</span>\n`;
-        output += `<span style="color:#08736d;">${"─".repeat(105)}</span>\n`;
-        for (const pvc of persistentVolumeClaims) output += `${escapeHtml(pvc.name.padEnd(21))}${escapeHtml(pvc.status.padEnd(10))}${escapeHtml(pvc.volumeName.padEnd(20))}${escapeHtml(pvc.capacity.padEnd(11))}${escapeHtml(pvc.accessModes.padEnd(15))}${escapeHtml(pvc.volumeMode.padEnd(14))}${escapeHtml((pvc.storageClassName || "<none>").padEnd(12))}\n`;
-        printPre(output.trimEnd()); return true;
+        const rows = persistentVolumeClaims.map((pvc) => [
+          pvc.name,
+          pvc.status,
+          pvc.volumeName,
+          pvc.capacity,
+          pvc.accessModes,
+          pvc.volumeMode,
+          pvc.storageClassName || "<none>",
+        ]);
+        printPre(
+          formatTerminalTable(
+            ["NAME", "STATUS", "VOLUME", "CAPACITY", "ACCESS MODES", "VOLUME MODE", "STORAGECLASS"],
+            rows,
+          ),
+        );
+        return true;
       }
 
       if (resource === "pv" || resource === "pvs" || resource === "persistentvolumes") {
         if (persistentVolumes.length === 0) { printHtml(`<span style="color:#a8cfca;">No resources found.</span>`); return true; }
-        let output = `<span style="color:#00e5d4;font-weight:700;">NAME                 CAPACITY   ACCESS MODES   RECLAIM POLICY   STATUS      CLAIM</span>\n`;
-        output += `<span style="color:#08736d;">${"─".repeat(92)}</span>\n`;
-        for (const pv of persistentVolumes) output += `${escapeHtml(pv.name.padEnd(21))}${escapeHtml(pv.capacity.padEnd(11))}${escapeHtml(pv.accessModes.padEnd(15))}${"Delete".padEnd(17)}${escapeHtml(pv.status.padEnd(12))}${escapeHtml(pv.claimName || "<none>")}\n`;
-        printPre(output.trimEnd()); return true;
+        const rows = persistentVolumes.map((pv) => [
+          pv.name,
+          pv.capacity,
+          pv.accessModes,
+          "Delete",
+          pv.status,
+          pv.claimName || "<none>",
+        ]);
+        printPre(
+          formatTerminalTable(
+            ["NAME", "CAPACITY", "ACCESS MODES", "RECLAIM POLICY", "STATUS", "CLAIM"],
+            rows,
+          ),
+        );
+        return true;
       }
 
       if (resource === "job" || resource === "jobs") {
         if (jobs.length === 0) { printHtml(`<span style="color:#a8cfca;">No resources found.</span>`); return true; }
-        let output = `<span style="color:#00e5d4;font-weight:700;">NAME                    COMPLETIONS   DURATION   AGE</span>\n`;
-        output += `<span style="color:#08736d;">${"─".repeat(62)}</span>\n`;
-        for (const job of jobs) output += `${escapeHtml(job.name.padEnd(24))}${`${job.succeeded}/${job.completions}`.padEnd(14)}${"1s".padEnd(11)}1s\n`;
-        printPre(output.trimEnd()); return true;
+        const rows = jobs.map((job) => [
+          job.name,
+          `${job.succeeded}/${job.completions}`,
+          "1s",
+          "1s",
+        ]);
+        printPre(
+          formatTerminalTable(
+            ["NAME", "COMPLETIONS", "DURATION", "AGE"],
+            rows,
+          ),
+        );
+        return true;
       }
 
       if (resource === "runtimeclass" ||
         resource === "runtimeclasses") {
-        const nameWidth = Math.max(
-          8,
-          ...Array.from(activeRuntimeClasses).map(
-            (runtimeClass) => runtimeClass.length + 2,
+        const rows = Array.from(activeRuntimeClasses).map((runtimeClass) => [
+          runtimeClass,
+          runtimeClass,
+          "1d",
+        ]);
+
+        printPre(
+          formatTerminalTable(
+            ["NAME", "HANDLER", "AGE"],
+            rows,
           ),
         );
-        const handlerWidth = 10;
-        const ageWidth = 7;
-
-        let output =
-          `<span style="color:#00e5d4;font-weight:700;">` +
-          `${"NAME".padEnd(nameWidth)}${"HANDLER".padEnd(handlerWidth)}${"AGE".padEnd(ageWidth)}` +
-          `</span>\n`;
-
-        output += `<span style="color:#08736d;">${"─".repeat(
-          nameWidth + handlerWidth + ageWidth,
-        )}</span>\n`;
-
-        for (const runtimeClass of activeRuntimeClasses) {
-          output +=
-            `${escapeHtml(runtimeClass.padEnd(nameWidth))}` +
-            `${escapeHtml(runtimeClass.padEnd(handlerWidth))}` +
-            `${"1d".padEnd(ageWidth)}\n`;
-        }
-
-        printPre(output.trimEnd());
 
         if (activeRuntimeClasses.has("edera")) {
           markDemoStepComplete("edera-runtimeclass-list");
@@ -6382,14 +6534,18 @@ Kernel isolation: enabled</span>`);
           return true;
         }
 
-        let html = `<span style="color:#00e5d4;font-weight:700;">NAME                 READY   UP-TO-DATE   AVAILABLE</span>\n`;
-        html += `<span style="color:#08736d;">${"─".repeat(65)}</span>\n`;
-
-        for (const deployment of deployments) {
-          html += `${escapeHtml(deployment.name.padEnd(21))}${deployment.readyReplicas}/${deployment.replicas}     ${String(deployment.replicas).padEnd(11)}${deployment.readyReplicas}\n`;
-        }
-
-        printPre(html.trimEnd());
+        const rows = deployments.map((deployment) => [
+          deployment.name,
+          `${deployment.readyReplicas}/${deployment.replicas}`,
+          String(deployment.replicas),
+          String(deployment.readyReplicas),
+        ]);
+        printPre(
+          formatTerminalTable(
+            ["NAME", "READY", "UP-TO-DATE", "AVAILABLE"],
+            rows,
+          ),
+        );
         markDemoStepComplete("deployment-list");
         return true;
       }
@@ -6399,27 +6555,17 @@ Kernel isolation: enabled</span>`);
         resource === "namespace" ||
         resource === "ns"
       ) {
-        let html =
-          `<span style="color:#00e5d4;font-weight:700;">` +
-          `NAME                  STATUS     AGE` +
-          `</span>\n`;
-
-        html += `<span style="color:#08736d;">${"─".repeat(
-          45,
-        )}</span>\n`;
-
-        for (const namespace of namespaces) {
-          html +=
-            `${escapeHtml(
-              namespace.name.padEnd(22),
-            )}` +
-            `<span style="color:#b8ff3c;">${escapeHtml(
-              namespace.status.padEnd(11),
-            )}</span>` +
-            `${escapeHtml(namespace.age)}\n`;
-        }
-
-        printPre(html.trimEnd());
+        const rows = namespaces.map((namespace) => [
+          namespace.name,
+          namespace.status,
+          namespace.age,
+        ]);
+        printPre(
+          formatTerminalTable(
+            ["NAME", "STATUS", "AGE"],
+            rows,
+          ),
+        );
 
         return true;
       }
@@ -7680,8 +7826,10 @@ Kernel isolation: enabled</span>`);
         if (tokens[0] === "kubectl") {
           if (tokens[1] === "get" && tokens[2] === "pods" && tokens.includes("-n") && tokens[tokens.indexOf("-n") + 1] === "falco") {
             printPre(
-              `<span style="color:#dff7f0;">NAME                                      READY   STATUS    RESTARTS   AGE
-falco-edera-node-7d8f9                   1/1     Running   0          2m</span>`,
+              formatTerminalTable(
+                ["NAME", "READY", "STATUS", "RESTARTS", "AGE"],
+                [[{ text: "falco-edera-node-7d8f9", color: "#b8ff3c" }, "1/1", "Running", "0", "2m"]],
+              ),
             );
             markDemoStepComplete("falco-pods");
             return;

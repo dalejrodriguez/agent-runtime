@@ -683,6 +683,10 @@ customRules:
         (proc.cmdline contains "http://" or proc.cmdline contains "https://")
 `;
 
+const EDERA_PROTECT_ENDPOINT = "tcp://192.168.64.40";
+const EDERA_RUNTIME_OCAP_DAEMONSET = "edera-runtime-ocap-proxy";
+const EDERA_RUNTIME_NAMESPACE = "edera-runtime";
+
 const AGENT_SANDBOX_VERSION = "v0.5.0rc1";
 
 const AGENT_SANDBOX_MANIFEST_YAML = `apiVersion: agents.x-k8s.io/v1beta1
@@ -767,6 +771,55 @@ spec:
 const AGENT_SANDBOX_ROUTER_COMMAND = `kubectl apply -f https://raw.githubusercontent.com/kubernetes-sigs/agent-sandbox/${AGENT_SANDBOX_VERSION}/clients/python/agentic-sandbox-client/sandbox-router/sandbox_router.yaml`;
 
 const AGENT_SANDBOX_DEMO_STEPS: DemoStep[] = [
+  {
+    id: "edera-ocap-daemonset",
+    title: "Verify the Edera Object Capabilities proxy",
+    description:
+      "The Edera Runtime is deployed with an Object Capabilities (OCAP) proxy as a DaemonSet. Verify that the proxy is present across the cluster before creating agent sandboxes.",
+    command: "kubectl get daemonsets -A",
+  },
+  {
+    id: "edera-ocap-pods",
+    title: "Inspect the Edera Runtime and OCAP proxy pods",
+    description:
+      `Inspect the <code class='guide-code'>edera-runtime</code> namespace. The controller manager and OCAP proxy pods should be running; the proxy has network connectivity so it can participate in the Edera Runtime control path.`,
+    command: "kubectl get pods -n edera-runtime",
+  },
+  {
+    id: "protect-zone-list-initial",
+    title: "Connect to the Protect API and list zones",
+    description:
+      `Use the Protect client against the Edera Runtime endpoint exposed by the local lab. This shows the zone inventory that the OCAP-enabled runtime can manage.`,
+    command: `protect -c ${EDERA_PROTECT_ENDPOINT} zone list`,
+  },
+  {
+    id: "protect-zone-launch",
+    title: "Launch an Edera zone",
+    description:
+      "Create a normal Edera zone through the Protect API. The zone is the isolation boundary that the runtime can use for untrusted work.",
+    command: `protect -c ${EDERA_PROTECT_ENDPOINT} zone launch --name my-test-zone-1 --wait`,
+  },
+  {
+    id: "protect-zone-list-ready",
+    title: "Verify the zone is ready",
+    description:
+      "List zones again and verify that the new zone has reached ready state and has been assigned network addresses.",
+    command: `protect -c ${EDERA_PROTECT_ENDPOINT} zone list`,
+  },
+  {
+    id: "protect-zone-destroy",
+    title: "Destroy the test zone",
+    description:
+      "Cleanly tear down the test zone through the same Protect API. The --wait flag makes the lifecycle transition explicit in the terminal.",
+    command: `protect -c ${EDERA_PROTECT_ENDPOINT} zone destroy my-test-zone-1 --wait`,
+  },
+  {
+    id: "protect-zone-list-final",
+    title: "Confirm the zone was destroyed",
+    description:
+      "List the zones one final time. The test zone should now be shown as destroyed, demonstrating the complete Edera zone lifecycle.",
+    command: `protect -c ${EDERA_PROTECT_ENDPOINT} zone list`,
+  },
   {
     id: "agent-sandbox-version",
     title: "Pin a v1beta1 Agent Sandbox release",
@@ -1550,7 +1603,7 @@ vfio_pci`;
   // actually exists in the cluster. Until it's created the pod can't be
   // admitted, so kubectl output treats it as having no runtime class. We use
   // this anywhere runtimeClassName is surfaced (custom-columns, jsonpath,
-  // describe) so the ExploitGym proxy only reads as `edera` after the user
+  // describe) so a pod only reads as `edera` after the user
   // applies edera/runtimeclass-edera.yaml.
   const effectiveRuntimeClass = (pod: LocalPod): string | undefined =>
     pod.runtimeClassName && activeRuntimeClasses.has(pod.runtimeClassName)
@@ -1562,7 +1615,7 @@ vfio_pci`;
     { name: "kube-system", status: "Active", age: "10m" },
     { name: "kube-public", status: "Active", age: "10m" },
     { name: "kube-node-lease", status: "Active", age: "10m" },
-    { name: "exploitgym", status: "Active", age: "10m" },
+    { name: "edera-runtime", status: "Active", age: "10m" },
   ];
 
   let deployments: LocalDeployment[] = [];
@@ -3248,6 +3301,25 @@ const renderNodes = () => {
         </div>
 
         <div class="cli-help-section">
+          <div class="cli-help-section-title">Edera Runtime + Object Capabilities</div>
+
+          <div class="cli-help-command">
+            <code>kubectl get daemonsets -A</code>
+            <span>Verify the Edera Runtime OCAP proxy DaemonSet is running.</span>
+          </div>
+
+          <div class="cli-help-command">
+            <code>kubectl get pods -n edera-runtime</code>
+            <span>Inspect the Edera Runtime controller and OCAP proxy pods.</span>
+          </div>
+
+          <div class="cli-help-command">
+            <code>protect -c ${EDERA_PROTECT_ENDPOINT} zone list</code>
+            <span>List Edera zones through the Protect API endpoint used by the lab.</span>
+          </div>
+        </div>
+
+        <div class="cli-help-section">
           <div class="cli-help-section-title">AI Agent Sandbox</div>
 
           <div class="cli-help-command">
@@ -3266,7 +3338,7 @@ const renderNodes = () => {
           </div>
 
           <div class="cli-help-command">
-            <code>kubectl exec my-sandbox -- python3 -c "print(2+2)"</code>
+            <code>kubectl exec -it my-sandbox -- python3 -c "print(2+2)"</code>
             <span>Execute Python inside the sandbox runtime.</span>
           </div>
 
@@ -3789,6 +3861,18 @@ const renderNodes = () => {
     if (tokens[0] !== "protect") {
       return false;
     }
+
+    // The real Protect CLI accepts a client endpoint before the resource command,
+    // e.g. `protect -c tcp://192.168.64.40 zone list`. Normalize that global
+    // option away so the existing resource handlers can process the same command.
+    if (tokens[1] === "-c" || tokens[1] === "--client") {
+      tokens.splice(1, 2);
+    } else if (tokens[1]?.startsWith("-c=")) {
+      tokens.splice(1, 1);
+    } else if (tokens[1]?.startsWith("--client=")) {
+      tokens.splice(1, 1);
+    }
+
     if (
       tokens.length === 1 ||
       tokens[1] === "--help" ||
@@ -3965,6 +4049,16 @@ const renderNodes = () => {
           hasDestroyedZone ? "final-list" : "zone-list",
         );
 
+        if (activeDemoMode === "agent-sandbox") {
+          if (protectZones.length === 0) {
+            markDemoStepComplete("protect-zone-list-initial");
+          } else if (protectZones.some((zone) => zone.state === "ready")) {
+            markDemoStepComplete("protect-zone-list-ready");
+          } else if (hasDestroyedZone) {
+            markDemoStepComplete("protect-zone-list-final");
+          }
+        }
+
         if (protectZones.some((zone) => zone.name === "zone-gpu")) {
           markDemoStepComplete("gpu-zone-list");
         }
@@ -4055,6 +4149,9 @@ const renderNodes = () => {
         );
 
         markDemoStepComplete("zone-launch");
+        if (activeDemoMode === "agent-sandbox" && name === "my-test-zone-1") {
+          markDemoStepComplete("protect-zone-launch");
+        }
 
         return true;
       }
@@ -4100,6 +4197,9 @@ const renderNodes = () => {
         }
 
         markDemoStepComplete("zone-destroy");
+        if (activeDemoMode === "agent-sandbox" && identifier === "my-test-zone-1") {
+          markDemoStepComplete("protect-zone-destroy");
+        }
 
         return true;
       }
@@ -4550,6 +4650,35 @@ Kernel isolation: enabled</span>`);
     if (tokens[1] === "get") {
       const getArgs = tokens.slice(2);
       const getJoined = getArgs.join(" ");
+
+      if (
+        (getJoined.includes("daemonsets") || getJoined.includes("daemonset") || getJoined.includes("ds")) &&
+        tokens.includes("-A")
+      ) {
+        printPre(
+          `<span style="color:#dff7f0;">NAMESPACE          NAME                         DESIRED   CURRENT   READY   UP-TO-DATE   AVAILABLE   NODE SELECTOR   AGE</span>\n` +
+          `<span style="color:#b8ff3c;">edera-runtime      ${EDERA_RUNTIME_OCAP_DAEMONSET.padEnd(28)}2         2         2       2            2           &lt;none&gt;          10m</span>\n` +
+          `<span style="color:#dff7f0;">kube-system        kindnet                      3         3         3       3            3           kubernetes.io/os=linux   10m</span>\n` +
+          `<span style="color:#dff7f0;">kube-system        kube-proxy                    3         3         3       3            3           kubernetes.io/os=linux   10m</span>`,
+        );
+        markDemoStepComplete("edera-ocap-daemonset");
+        return true;
+      }
+
+      if (
+        getJoined.includes("pods") &&
+        tokens.includes("-n") &&
+        tokens[tokens.indexOf("-n") + 1] === EDERA_RUNTIME_NAMESPACE
+      ) {
+        printPre(
+          `<span style="color:#dff7f0;">NAME                                      READY   STATUS    RESTARTS   AGE</span>\n` +
+          `<span style="color:#b8ff3c;">edera-runtime-controller-manager-646ddcbfbb-p656l   1/1     Running   0          10m</span>\n` +
+          `<span style="color:#b8ff3c;">edera-runtime-ocap-proxy-gn8g7                    3/3     Running   0          3m</span>\n` +
+          `<span style="color:#b8ff3c;">edera-runtime-ocap-proxy-gtvf9                    3/3     Running   0          3m</span>`,
+        );
+        markDemoStepComplete("edera-ocap-pods");
+        return true;
+      }
 
       if (getJoined.includes("crd") && getJoined.includes("sandboxes.agents.x-k8s.io")) {
         if (!agentSandboxInstalled) {
@@ -6934,6 +7063,9 @@ Kernel isolation: enabled</span>`);
         let tokens = tokenize(rawCmd);
         if (tokens[0] === "sudo") {
           tokens = tokens.slice(1);
+        }
+        if (tokens[0] === "kc" || tokens[0] === "k") {
+          tokens[0] = "kubectl";
         }
         if (tokens[0] === "clear") {
           output.innerHTML = "";

@@ -939,7 +939,7 @@ const AGENT_SANDBOX_DEMO_STEPS: DemoStep[] = [
     id: "agent-sandbox-next-steps",
     title: "Plan production protections",
     description:
-      `For production agents, layer controls around the Edera zone: use workload identity and attestation with SPIRE, scope file/device/service access with object capabilities, minimize tool calls, inject credentials outside the agent, and consider an in-zone sub-sandbox for especially risky tool calls. <a href="https://docs.edera.dev/technical-overview/security/reference-architecture/#ai-agent-isolation" target="_blank" rel="noopener noreferrer">Edera AI agent isolation reference architecture →</a>`,
+      `For production agents, layer controls around the Edera zone: use workload identity and attestation with SPIRE, scope file/device/service access with object capabilities, minimize tool calls, inject credentials outside the agent, and consider an in-zone sub-sandbox for especially risky tool calls. <a href="https://docs.edera.dev/technical-overview/security/reference-architecture/#ai-agent-isolation" target="_blank" rel="noopener noreferrer">Edera AI Agent isolation reference architecture →</a>`,
     command: "kubectl get runtimeclass edera",
     optional: true,
   },
@@ -973,7 +973,7 @@ async function initTerminalDemo() {
 
       <section class="brand-hero" aria-labelledby="hero-title">
         <div class="hero-eyebrow">WEBERNETES DEMO</div>
-        <h2 id="hero-title">AI AGENT<br />RUNTIME</h2>
+        <h2 id="hero-title">AGENT<br />RUNTIME</h2>
         <p>
           Edera is the secure execution platform for all software. Built so every
           untrusted workload runs trusted, and free to move at the speed of your business.

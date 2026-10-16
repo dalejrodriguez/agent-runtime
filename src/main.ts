@@ -1094,7 +1094,10 @@ async function initTerminalDemo() {
         <div class="panel" id="capabilities-panel" style="grid-column:1 / -1;">
           <div class="panel-header">
             <span class="drag-handle">⋮⋮</span>
-            <h3>🔑 Agent Capabilities</h3>
+            <div>
+              <h3>🔑 Agent Capabilities</h3>
+              <div class="panel-subtitle">Narrow, explicit authority granted to the agent</div>
+            </div>
             <span id="capability-count" class="panel-count">1 Capability</span>
             <button class="hide-btn" id="hide-capabilities-btn">Hide</button>
           </div>
@@ -1743,6 +1746,67 @@ vfio_pci`;
       labels: { app: "demo" },
     },
   ];
+
+  const ensureCoreClusterPods = () => {
+    const corePods: LocalPod[] = [
+      {
+        name: "edera-runtime-controller-manager-646ddcbfbb-p656l",
+        namespace: "edera-runtime",
+        status: "Running",
+        age: "10m",
+        image: "edera/runtime-controller:latest",
+        ip: "10.244.0.20",
+        node: "node-1",
+        labels: { "app.kubernetes.io/name": "edera-runtime-controller-manager" },
+      },
+      {
+        name: "edera-runtime-ocap-proxy-gn8g7",
+        namespace: "edera-runtime",
+        status: "Running",
+        age: "3m",
+        image: "edera/runtime-ocap-proxy:latest",
+        ip: "10.244.0.21",
+        node: "node-2",
+        labels: { "app.kubernetes.io/name": "edera-runtime-ocap-proxy" },
+      },
+      {
+        name: "edera-runtime-ocap-proxy-gtvf9",
+        namespace: "edera-runtime",
+        status: "Running",
+        age: "3m",
+        image: "edera/runtime-ocap-proxy:latest",
+        ip: "10.244.0.22",
+        node: "node-3",
+        labels: { "app.kubernetes.io/name": "edera-runtime-ocap-proxy" },
+      },
+      ...[1, 2, 3].map((index) => ({
+        name: `kindnet-${index}abc`,
+        namespace: "kube-system",
+        status: "Running",
+        age: "10m",
+        image: "kindnet:latest",
+        ip: `10.244.${index}.1`,
+        node: `node-${index}`,
+        labels: { "k8s-app": "kindnet", "kubernetes.io/os": "linux" },
+      })),
+      ...[1, 2, 3].map((index) => ({
+        name: `kube-proxy-${index}xyz`,
+        namespace: "kube-system",
+        status: "Running",
+        age: "10m",
+        image: "kube-proxy:latest",
+        ip: "<none>",
+        node: `node-${index}`,
+        labels: { "k8s-app": "kube-proxy", "kubernetes.io/os": "linux" },
+      })),
+    ];
+
+    for (const corePod of corePods) {
+      if (!pods.some((pod) => pod.name === corePod.name && pod.namespace === corePod.namespace)) {
+        pods.push(corePod);
+      }
+    }
+  };
 
   let nodes: LocalNode[] = [
     {
@@ -4945,10 +5009,25 @@ Kernel isolation: enabled</span>`);
       const getArgs = tokens.slice(2);
       const getJoined = getArgs.join(" ");
 
+      // `kubectl get pods -A` must use the pod renderer below, not the
+      // daemonset table. Keep the common cluster pods in the simulator so
+      // all-namespaces output reflects the same resources shown by the
+      // namespace-specific pod view.
+      if (
+        getJoined.includes("pods") &&
+        (tokens.includes("-A") || tokens.includes("--all-namespaces"))
+      ) {
+        ensureCoreClusterPods();
+        // Fall through to the generic pod renderer below. This explicit
+        // branch is intentionally non-returning: it prevents future
+        // daemonset-specific handling from claiming `pods -A`.
+      }
+
       if (
         (getJoined.includes("daemonsets") || getJoined.includes("daemonset") || getJoined.includes("ds")) &&
-        tokens.includes("-A")
+        (tokens.includes("-A") || tokens.includes("--all-namespaces"))
       ) {
+        ensureCoreClusterPods();
         printPre(
           formatTerminalTable(
             [
@@ -6437,9 +6516,17 @@ Kernel isolation: enabled</span>`);
             );
           }
 
+          const readyCount =
+            pod.namespace === EDERA_RUNTIME_NAMESPACE &&
+            pod.name.startsWith("edera-runtime-ocap-proxy-")
+              ? "3/3"
+              : pod.status === "Running"
+                ? "1/1"
+                : "0/1";
+
           rowParts.push(
             escapeHtml(pod.name.padEnd(nameWidth)),
-            `${pod.status === "Running" ? "1/1" : "0/1"}`.padEnd(readyWidth),
+            readyCount.padEnd(readyWidth),
             `<span style="color:${statusColor};">${escapeHtml(
               pod.status.padEnd(statusWidth),
             )}</span>`,

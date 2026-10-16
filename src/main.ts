@@ -5008,14 +5008,17 @@ Kernel isolation: enabled</span>`);
     if (tokens[1] === "get") {
       const getArgs = tokens.slice(2);
       const getJoined = getArgs.join(" ");
+      const requestedResource = (tokens[2] || "").toLowerCase();
+      const isAllNamespaces =
+        tokens.includes("-A") || tokens.includes("--all-namespaces");
 
       // `kubectl get pods -A` must use the pod renderer below, not the
       // daemonset table. Keep the common cluster pods in the simulator so
       // all-namespaces output reflects the same resources shown by the
       // namespace-specific pod view.
       if (
-        getJoined.includes("pods") &&
-        (tokens.includes("-A") || tokens.includes("--all-namespaces"))
+        ["pods", "pod"].includes(requestedResource) &&
+        isAllNamespaces
       ) {
         ensureCoreClusterPods();
         // Fall through to the generic pod renderer below. This explicit
@@ -5024,8 +5027,8 @@ Kernel isolation: enabled</span>`);
       }
 
       if (
-        (getJoined.includes("daemonsets") || getJoined.includes("daemonset") || getJoined.includes("ds")) &&
-        (tokens.includes("-A") || tokens.includes("--all-namespaces"))
+        ["daemonsets", "daemonset", "ds"].includes(requestedResource) &&
+        isAllNamespaces
       ) {
         ensureCoreClusterPods();
         printPre(

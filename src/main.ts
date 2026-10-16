@@ -1091,15 +1091,15 @@ async function initTerminalDemo() {
           </div>
         </div>
 
-        <div class="panel" id="capabilities-panel">
+        <div class="panel" id="capabilities-panel" style="grid-column:1 / -1;">
           <div class="panel-header">
             <span class="drag-handle">⋮⋮</span>
             <h3>🔑 Agent Capabilities</h3>
             <span id="capability-count" class="panel-count">1 Capability</span>
             <button class="hide-btn" id="hide-capabilities-btn">Hide</button>
           </div>
-          <div class="resource-body" id="capabilities-body">
-            <div id="capability-grid" class="resource-list"></div>
+          <div id="capabilities-body" style="padding:10px 18px 12px;background:transparent;color:#163c38;opacity:1;">
+            <div id="capability-grid" class="capability-list" style="opacity:1;color:#0b2422;"></div>
           </div>
         </div>
 
@@ -2210,61 +2210,70 @@ const renderNodes = () => {
       lastOcapAction === "allowed"
         ? {
             label: "ALLOWED",
-            color: "#b8ff3c",
+            color: "#2f7d14",
             detail: "Latest request matched an explicit capability rule.",
           }
         : lastOcapAction === "denied"
           ? {
               label: "DENIED",
-              color: "#ff7373",
+              color: "#b42318",
               detail: "Latest request was outside the granted authority.",
             }
           : lastOcapAction === "credential-blocked"
             ? {
                 label: "CREDENTIAL OUTSIDE SANDBOX",
-                color: "#00e5d4",
+                color: "#007a70",
                 detail: "No GitHub credential is present in the agent environment.",
               }
             : {
                 label: "READY",
-                color: "#a8cfca",
+                color: "#276b63",
                 detail: "Waiting for the agent to invoke this capability.",
               };
 
     capabilityGrid.innerHTML = `
-      <div style="padding:18px;border:1px solid rgba(184,255,60,.18);border-radius:14px;background:rgba(8,23,22,.45);">
-        <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:8px;">
-          <div style="font-size:18px;font-weight:800;color:#f8fffd;">github</div>
-          <span style="font-size:11px;font-weight:800;letter-spacing:.08em;color:${action.color};">${action.label}</span>
-        </div>
-
-        <div style="font-size:13px;color:#a8cfca;line-height:1.45;margin-bottom:14px;">
-          Git over HTTPS to <strong style="color:#dff7f0;">github.com</strong>
-        </div>
-
-        <div style="display:grid;gap:8px;font-size:12px;">
-          <div style="display:flex;gap:8px;align-items:flex-start;">
-            <span style="min-width:48px;padding:3px 6px;border-radius:5px;background:rgba(184,255,60,.12);color:#b8ff3c;font-weight:800;text-align:center;">GET</span>
-            <code style="color:#dff7f0;overflow-wrap:anywhere;">github.com/kubernetes/kubernetes.git</code>
+      <div
+        style="
+          display:grid;
+          grid-template-columns:minmax(180px,1.05fr) minmax(260px,1.6fr) minmax(220px,1fr);
+          gap:14px;
+          align-items:center;
+          min-height:72px;
+          padding:10px 14px;
+          border:1px solid rgba(13,63,57,.12);
+          border-radius:14px;
+          background:#f5fbf9;
+          color:#163c38;
+          opacity:1;
+          box-sizing:border-box;
+        "
+      >
+        <div>
+          <div style="display:flex;align-items:center;gap:10px;margin-bottom:3px;">
+            <div style="font-size:16px;font-weight:800;color:#102f2c;">github</div>
+            <span style="font-size:10px;font-weight:800;letter-spacing:.08em;color:${action.color};">${action.label}</span>
           </div>
-
-          <div style="display:flex;gap:8px;align-items:flex-start;">
-            <span style="min-width:48px;padding:3px 6px;border-radius:5px;background:rgba(184,255,60,.12);color:#b8ff3c;font-weight:800;text-align:center;">POST</span>
-            <code style="color:#dff7f0;overflow-wrap:anywhere;">github.com/kubernetes/kubernetes.git</code>
-          </div>
-
-          <div style="margin-top:3px;color:#ff7373;">
-            ✕ Everything else is denied
+          <div style="font-size:11px;color:#4b6864;line-height:1.3;">
+            Git over HTTPS to <strong style="color:#173f3a;">github.com</strong>
           </div>
         </div>
 
-        <div style="display:flex;flex-wrap:wrap;gap:8px;margin-top:16px;padding-top:12px;border-top:1px solid rgba(168,207,202,.12);font-size:11px;color:#a8cfca;">
-          <span>🔐 Credential: host-side</span>
-          <span>👆 Touch ID: required</span>
+        <div style="display:grid;gap:5px;font-size:11px;min-width:0;">
+          <div style="display:flex;gap:8px;align-items:center;min-width:0;">
+            <span style="min-width:46px;padding:3px 6px;border-radius:5px;background:rgba(118,190,28,.14);color:#3e7f0e;font-weight:800;text-align:center;">GET</span>
+            <code style="color:#244e49;overflow-wrap:anywhere;">github.com/kubernetes/kubernetes.git</code>
+          </div>
+          <div style="display:flex;gap:8px;align-items:center;min-width:0;">
+            <span style="min-width:46px;padding:3px 6px;border-radius:5px;background:rgba(118,190,28,.14);color:#3e7f0e;font-weight:800;text-align:center;">POST</span>
+            <code style="color:#244e49;overflow-wrap:anywhere;">github.com/kubernetes/kubernetes.git</code>
+          </div>
+          <div style="color:#b42318;font-weight:700;">✕ Everything else is denied</div>
         </div>
 
-        <div style="margin-top:12px;font-size:11px;color:${action.color};">
-          ${action.detail}
+        <div style="display:grid;gap:4px;font-size:10px;color:#4b6864;line-height:1.25;">
+          <div><strong style="color:#315b55;">🔐 Credential:</strong> host-side</div>
+          <div><strong style="color:#315b55;">👆 Touch ID:</strong> required</div>
+          <div style="color:${action.color};font-weight:700;">${action.detail}</div>
         </div>
       </div>
     `;

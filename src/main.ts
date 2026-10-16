@@ -770,6 +770,39 @@ spec:
 
 const AGENT_SANDBOX_ROUTER_COMMAND = `kubectl apply -f https://raw.githubusercontent.com/kubernetes-sigs/agent-sandbox/${AGENT_SANDBOX_VERSION}/clients/python/agentic-sandbox-client/sandbox-router/sandbox_router.yaml`;
 
+const OCAP_GITHUB_CAPABILITY = `name = "github"
+
+description = "git over HTTPS to github.com, for the repositories granted below"
+
+require_touch_id = true
+
+[permissions.read]
+
+rules = [
+  { endpoint = "https://github.com", method = "GET", path = "/kubernetes/kubernetes.git" },
+]
+
+[permissions.push]
+
+includes = ["read"]
+
+rules = [
+  { endpoint = "https://github.com", method = "POST", path = "/kubernetes/kubernetes.git" },
+]
+
+# The token is the basic-auth password for endpoint.username.
+# Without a token, public repositories still work.
+[auth]
+
+scheme = "basic"
+optional = true
+
+# Inside the sandbox: send git's GitHub URLs to this capability's relay.
+[agent]
+
+git_insteadof = ["https://github.com/"]
+env = { GIT_TERMINAL_PROMPT = "0" }`;
+
 const AGENT_SANDBOX_DEMO_STEPS: DemoStep[] = [
   {
     id: "edera-ocap-daemonset",
@@ -784,6 +817,55 @@ const AGENT_SANDBOX_DEMO_STEPS: DemoStep[] = [
     description:
       `Inspect the <code class='guide-code'>edera-runtime</code> namespace. The controller manager and OCAP proxy pods should be running; the proxy has network connectivity so it can participate in the Edera Runtime control path.`,
     command: "kubectl get pods -n edera-runtime",
+  },
+  {
+    id: "ocap-explain",
+    title: "Give the agent a button, not the network",
+    description:
+      "An object capability is explicit authority: the agent receives a thing it can use, and that thing grants a narrowly scoped operation. Instead of ambient network access, give this agent one GitHub capability.",
+    command: "capability show github",
+  },
+  {
+    id: "ocap-definition",
+    title: "Inspect the GitHub capability",
+    description:
+      "This capability can communicate with GitHub, but only for the Kubernetes repository. GET is allowed for reads and POST is allowed for pushes. Other repositories and endpoints are not granted.",
+    command: "capability cat github",
+  },
+  {
+    id: "ocap-no-credentials",
+    title: "Verify credentials stay outside the sandbox",
+    description:
+      "The agent does not receive the GitHub credential. Authentication remains outside the sandbox and is performed by the capability relay.",
+    command: "capability credentials github",
+  },
+  {
+    id: "ocap-allowed",
+    title: "Use the capability",
+    description:
+      "Clone the repository granted by the capability. The request matches the explicit GET rule and is allowed.",
+    command: "git clone https://github.com/kubernetes/kubernetes.git",
+  },
+  {
+    id: "ocap-denied-repository",
+    title: "Try another repository",
+    description:
+      "The agent still has a GitHub capability, but it does not have access to this repository. The capability rejects the request.",
+    command: "git clone https://github.com/torvalds/linux.git",
+  },
+  {
+    id: "ocap-denied-network",
+    title: "Try arbitrary network access",
+    description:
+      "There is no ambient internet capability inside the sandbox. A request to an unrelated endpoint has nowhere to go and is denied.",
+    command: "curl https://example.com",
+  },
+  {
+    id: "ocap-compromise",
+    title: "Assume the agent is compromised",
+    description:
+      "Even if the agent is completely compromised, it only possesses the capabilities it was given. It has the buttons we granted, not the rest of the console.",
+    command: "capability attack github",
   },
   {
     id: "protect-zone-list-initial",
@@ -931,7 +1013,7 @@ const AGENT_SANDBOX_DEMO_STEPS: DemoStep[] = [
     id: "agent-sandbox-security-review",
     title: "Review the agent security boundary",
     description:
-      "Edera contains the compute environment: the agent gets its own kernel, filesystem, memory, and process space. That does not make credentials or data safe automatically, so keep credentials outside the agent and scope network access separately.",
+      "Edera contains the compute environment: the agent gets its own kernel, filesystem, memory, and process space. Object capabilities then make authority explicit and narrowly scoped. Credentials can remain outside the agent while capabilities expose only the operations the workload actually needs.",
     command: "cat agent-sandbox/sandbox.yaml",
     optional: true,
   },
@@ -939,7 +1021,7 @@ const AGENT_SANDBOX_DEMO_STEPS: DemoStep[] = [
     id: "agent-sandbox-next-steps",
     title: "Plan production protections",
     description:
-      `For production agents, layer controls around the Edera zone: use workload identity and attestation with SPIRE, scope file/device/service access with object capabilities, minimize tool calls, inject credentials outside the agent, and consider an in-zone sub-sandbox for especially risky tool calls. <a href="https://docs.edera.dev/technical-overview/security/reference-architecture/#ai-agent-isolation" target="_blank" rel="noopener noreferrer">Edera AI Agent isolation reference architecture →</a>`,
+      `For production agents, layer controls around the Edera zone: use workload identity and attestation with SPIRE, give agents narrowly scoped object capabilities, keep credentials outside the agent, minimize tool authority, and consider an in-zone sub-sandbox for especially risky tool calls. <a href="https://docs.edera.dev/technical-overview/security/reference-architecture/#ai-agent-isolation" target="_blank" rel="noopener noreferrer">Edera AI Agent isolation reference architecture →</a>`,
     command: "kubectl get runtimeclass edera",
     optional: true,
   },
@@ -1006,6 +1088,18 @@ async function initTerminalDemo() {
           </div>
           <div class="resource-body" id="nodes-body">
             <div id="node-grid" class="resource-list"></div>
+          </div>
+        </div>
+
+        <div class="panel" id="capabilities-panel">
+          <div class="panel-header">
+            <span class="drag-handle">⋮⋮</span>
+            <h3>🔑 Agent Capabilities</h3>
+            <span id="capability-count" class="panel-count">1 Capability</span>
+            <button class="hide-btn" id="hide-capabilities-btn">Hide</button>
+          </div>
+          <div class="resource-body" id="capabilities-body">
+            <div id="capability-grid" class="resource-list"></div>
           </div>
         </div>
 
@@ -1170,6 +1264,11 @@ async function initTerminalDemo() {
 
   const nodeGrid = document.querySelector<HTMLDivElement>("#node-grid")!;
   const nodeCount = document.querySelector<HTMLSpanElement>("#node-count")!;
+
+  const capabilityGrid =
+    document.querySelector<HTMLDivElement>("#capability-grid")!;
+  const capabilityCount =
+    document.querySelector<HTMLSpanElement>("#capability-count")!;
 
   const zoneGrid = document.querySelector<HTMLDivElement>("#zone-grid")!;
   const zoneCount = document.querySelector<HTMLSpanElement>("#zone-count")!;
@@ -1572,6 +1671,7 @@ vfio_pci`;
     agentSandboxWarmPoolCreated = false;
     agentSandboxRouterInstalled = false;
     agentSandboxRouterForwarded = false;
+    lastOcapAction = "idle";
 
     closeCompletionModal();
     window.location.reload();
@@ -1598,6 +1698,14 @@ vfio_pci`;
   let agentSandboxWarmPoolCreated = false;
   let agentSandboxRouterInstalled = false;
   let agentSandboxRouterForwarded = false;
+
+  type OcapAction =
+    | "idle"
+    | "allowed"
+    | "denied"
+    | "credential-blocked";
+
+  let lastOcapAction: OcapAction = "idle";
 
   // A pod's runtimeClassName is only "effective" once that RuntimeClass
   // actually exists in the cluster. Until it's created the pod can't be
@@ -2095,10 +2203,78 @@ const renderNodes = () => {
       })
       .join("");
   };
+  const renderCapability = () => {
+    capabilityCount.innerText = "1 Capability";
+
+    const action =
+      lastOcapAction === "allowed"
+        ? {
+            label: "ALLOWED",
+            color: "#b8ff3c",
+            detail: "Latest request matched an explicit capability rule.",
+          }
+        : lastOcapAction === "denied"
+          ? {
+              label: "DENIED",
+              color: "#ff7373",
+              detail: "Latest request was outside the granted authority.",
+            }
+          : lastOcapAction === "credential-blocked"
+            ? {
+                label: "CREDENTIAL OUTSIDE SANDBOX",
+                color: "#00e5d4",
+                detail: "No GitHub credential is present in the agent environment.",
+              }
+            : {
+                label: "READY",
+                color: "#a8cfca",
+                detail: "Waiting for the agent to invoke this capability.",
+              };
+
+    capabilityGrid.innerHTML = `
+      <div style="padding:18px;border:1px solid rgba(184,255,60,.18);border-radius:14px;background:rgba(8,23,22,.45);">
+        <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:8px;">
+          <div style="font-size:18px;font-weight:800;color:#f8fffd;">github</div>
+          <span style="font-size:11px;font-weight:800;letter-spacing:.08em;color:${action.color};">${action.label}</span>
+        </div>
+
+        <div style="font-size:13px;color:#a8cfca;line-height:1.45;margin-bottom:14px;">
+          Git over HTTPS to <strong style="color:#dff7f0;">github.com</strong>
+        </div>
+
+        <div style="display:grid;gap:8px;font-size:12px;">
+          <div style="display:flex;gap:8px;align-items:flex-start;">
+            <span style="min-width:48px;padding:3px 6px;border-radius:5px;background:rgba(184,255,60,.12);color:#b8ff3c;font-weight:800;text-align:center;">GET</span>
+            <code style="color:#dff7f0;overflow-wrap:anywhere;">github.com/kubernetes/kubernetes.git</code>
+          </div>
+
+          <div style="display:flex;gap:8px;align-items:flex-start;">
+            <span style="min-width:48px;padding:3px 6px;border-radius:5px;background:rgba(184,255,60,.12);color:#b8ff3c;font-weight:800;text-align:center;">POST</span>
+            <code style="color:#dff7f0;overflow-wrap:anywhere;">github.com/kubernetes/kubernetes.git</code>
+          </div>
+
+          <div style="margin-top:3px;color:#ff7373;">
+            ✕ Everything else is denied
+          </div>
+        </div>
+
+        <div style="display:flex;flex-wrap:wrap;gap:8px;margin-top:16px;padding-top:12px;border-top:1px solid rgba(168,207,202,.12);font-size:11px;color:#a8cfca;">
+          <span>🔐 Credential: host-side</span>
+          <span>👆 Touch ID: required</span>
+        </div>
+
+        <div style="margin-top:12px;font-size:11px;color:${action.color};">
+          ${action.detail}
+        </div>
+      </div>
+    `;
+  };
+
   const updateDashboard = () => {
     renderPods();
     renderNodes();
     renderProtectZones();
+    renderCapability();
   };
   let selectedDemoStepIndex: number | null = null;
   // The guide is dedicated to the Agent Sandbox + Edera runtime workflow.
@@ -2248,6 +2424,7 @@ const renderNodes = () => {
   };
   hidePanel("#pods-panel", "#pods-body", "#hide-pods-btn");
   hidePanel("#nodes-panel", "#nodes-body", "#hide-nodes-btn");
+  hidePanel("#capabilities-panel", "#capabilities-body", "#hide-capabilities-btn");
   hidePanel("#protect-panel", "#protect-body", "#hide-protect-btn");
   hidePanel("#guide-panel", "#guide-body", "#hide-guide-btn");
   document
@@ -3390,6 +3567,40 @@ const renderNodes = () => {
           <div class="cli-help-command">
             <code>protect -c ${EDERA_PROTECT_ENDPOINT} zone list</code>
             <span>List Edera zones through the Protect API endpoint used by the lab.</span>
+          </div>
+        </div>
+
+        <div class="cli-help-section">
+          <div class="cli-help-section-title">Object Capabilities</div>
+
+          <div class="cli-help-command">
+            <code>capability show github</code>
+            <span>Show the agent's explicit GitHub capability.</span>
+          </div>
+
+          <div class="cli-help-command">
+            <code>capability cat github</code>
+            <span>Inspect the capability definition and its allow rules.</span>
+          </div>
+
+          <div class="cli-help-command">
+            <code>capability credentials github</code>
+            <span>Verify the GitHub credential never enters the agent sandbox.</span>
+          </div>
+
+          <div class="cli-help-command">
+            <code>git clone https://github.com/kubernetes/kubernetes.git</code>
+            <span>Exercise the GitHub capability with an explicitly allowed request.</span>
+          </div>
+
+          <div class="cli-help-command">
+            <code>git clone https://github.com/torvalds/linux.git</code>
+            <span>Try a repository that was not granted by the capability.</span>
+          </div>
+
+          <div class="cli-help-command">
+            <code>capability attack github</code>
+            <span>Assume the agent is compromised and inspect the remaining authority.</span>
           </div>
         </div>
 
@@ -7372,6 +7583,158 @@ Kernel isolation: enabled</span>`);
           printHtml(
             `<span style="color:#ff7373;">export: this simulator supports AGENT_SANDBOX_VERSION only.</span>`,
           );
+          return;
+        }
+
+        if (tokens[0] === "capability") {
+          const subcommand = tokens[1] || "";
+          const capabilityName = tokens[2] || "";
+
+          if (capabilityName && capabilityName !== "github") {
+            printHtml(
+              `<span style="color:#ff7373;">capability: unknown capability "${escapeHtml(
+                capabilityName,
+              )}"</span>`,
+            );
+            return;
+          }
+
+          if (subcommand === "show" && capabilityName === "github") {
+            lastOcapAction = "idle";
+            printPre(
+              formatTerminalTable(
+                ["CAPABILITY", "ENDPOINT", "RESOURCE", "AUTH"],
+                [[
+                  { text: "github", color: "#b8ff3c" },
+                  "https://github.com",
+                  "/kubernetes/kubernetes.git",
+                  "host-side",
+                ]],
+              ),
+            );
+            printHtml(
+              `<span style="color:#00e5d4;">This is the agent's controller: one explicit capability, not ambient network access.</span>`,
+            );
+            updateDashboard();
+            markDemoStepComplete("ocap-explain");
+            return;
+          }
+
+          if (subcommand === "cat" && capabilityName === "github") {
+            lastOcapAction = "idle";
+            printPre(
+              `<span style="color:#b8ff3c;">${escapeHtml(
+                OCAP_GITHUB_CAPABILITY,
+              )}</span>`,
+            );
+            updateDashboard();
+            markDemoStepComplete("ocap-definition");
+            return;
+          }
+
+          if (
+            subcommand === "credentials" &&
+            capabilityName === "github"
+          ) {
+            lastOcapAction = "credential-blocked";
+            printHtml(
+              `<span style="color:#00e5d4;">Sandbox environment: no GitHub credentials present.</span>`,
+            );
+            printHtml(
+              `<span style="color:#b8ff3c;">✓ Credential remains outside the agent sandbox.</span>`,
+            );
+            printHtml(
+              `<span style="color:#a8cfca;">The capability performs authentication on behalf of the agent.</span>`,
+            );
+            updateDashboard();
+            markDemoStepComplete("ocap-no-credentials");
+            return;
+          }
+
+          if (subcommand === "attack" && capabilityName === "github") {
+            lastOcapAction = "denied";
+            printHtml(
+              `<span style="color:#ff7373;">CAPABILITY BOUNDARY REACHED</span>`,
+            );
+            printHtml(
+              `<span style="color:#a8cfca;">The agent may be compromised, but its authority remains limited to the github capability.</span>`,
+            );
+            printPre(
+              formatTerminalTable(
+                ["REQUEST", "RESULT"],
+                [
+                  ["GET github.com/kubernetes/kubernetes.git", "ALLOWED"],
+                  ["POST github.com/kubernetes/kubernetes.git", "ALLOWED"],
+                  ["GET github.com/torvalds/linux.git", "DENIED"],
+                  ["GET example.com", "DENIED"],
+                  ["READ GITHUB CREDENTIAL", "NOT PRESENT"],
+                ],
+              ),
+            );
+            updateDashboard();
+            markDemoStepComplete("ocap-compromise");
+            return;
+          }
+
+          printHtml(
+            `<span style="color:#ff7373;">capability: unsupported command. Try 'help'.</span>`,
+          );
+          return;
+        }
+
+        if (
+          tokens[0] === "git" &&
+          tokens[1] === "clone" &&
+          tokens[2] === "https://github.com/kubernetes/kubernetes.git"
+        ) {
+          lastOcapAction = "allowed";
+          printHtml(
+            `<span style="color:#b8ff3c;">✓ OCAP ALLOW</span>`,
+          );
+          printHtml(
+            `<span style="color:#00e5d4;">github capability → GET github.com/kubernetes/kubernetes.git</span>`,
+          );
+          printHtml(
+            `<span style="color:#a8cfca;">Authentication performed outside the agent sandbox.</span>`,
+          );
+          printHtml(
+            `<span style="color:#b8ff3c;">Cloning into 'kubernetes'...</span>`,
+          );
+          updateDashboard();
+          markDemoStepComplete("ocap-allowed");
+          return;
+        }
+
+        if (
+          tokens[0] === "git" &&
+          tokens[1] === "clone" &&
+          tokens[2] === "https://github.com/torvalds/linux.git"
+        ) {
+          lastOcapAction = "denied";
+          printHtml(
+            `<span style="color:#ff7373;">✕ OCAP DENY</span>`,
+          );
+          printHtml(
+            `<span style="color:#a8cfca;">github capability does not grant access to github.com/torvalds/linux.git</span>`,
+          );
+          updateDashboard();
+          markDemoStepComplete("ocap-denied-repository");
+          return;
+        }
+
+        if (
+          tokens[0] === "curl" &&
+          tokens[1] === "https://example.com"
+        ) {
+          lastOcapAction = "denied";
+          printHtml(
+            `<span style="color:#ff7373;">✕ NETWORK DENIED</span>`,
+          );
+          printHtml(
+            `<span style="color:#a8cfca;">No ambient network capability exists inside the sandbox.</span>`,
+          );
+          updateDashboard();
+          markDemoStepComplete("ocap-denied-network");
           return;
         }
 

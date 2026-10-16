@@ -1065,7 +1065,7 @@ async function initTerminalDemo() {
         <div class="guide-header">
           <span class="drag-handle">⋮⋮</span>
           <div>
-            <div class="guide-title" id="guide-title">🤖 Agent Sandbox + Edera</div>
+            <div class="guide-title" id="guide-title">🤖 Agent Sandbox</div>
             <div class="guide-subtitle" id="guide-subtitle">
               <span class="desktop-only">Run each command below to run Kubernetes Agent Sandbox on the Edera runtime</span>
             </div>

@@ -1297,6 +1297,34 @@ async function initTerminalDemo() {
     </div>
   `;
 
+  // Mobile-only layout for the Agent Capabilities panel. Desktop keeps the
+  // three-column card; on phones the card stacks into one column, and the
+  // count badge and subtitle are hidden so the header fits on one line.
+  // !important is needed to override the card's inline styles.
+  const capabilityMobileStyles = document.createElement("style");
+  capabilityMobileStyles.textContent = `
+    @media (max-width: 768px) {
+      #capability-count,
+      #capabilities-panel .panel-subtitle {
+        display: none !important;
+      }
+      #hide-capabilities-btn {
+        margin-left: auto;
+      }
+      #capabilities-body {
+        padding: 10px 12px 12px !important;
+      }
+      #capabilities-panel .capability-card {
+        grid-template-columns: minmax(0, 1fr) !important;
+        gap: 10px !important;
+      }
+      #capabilities-panel .capability-target {
+        font-size: 10px;
+      }
+    }
+  `;
+  document.head.appendChild(capabilityMobileStyles);
+
   const output = document.querySelector<HTMLDivElement>("#output")!;
   const input = document.querySelector<HTMLInputElement>("#cmd")!;
   const terminalPrompt =
@@ -2398,6 +2426,7 @@ const renderNodes = () => {
 
     capabilityGrid.innerHTML = `
       <div
+        class="capability-card"
         style="
           display:grid;
           grid-template-columns:minmax(180px,1.05fr) minmax(260px,1.6fr) minmax(220px,1fr);
@@ -2423,14 +2452,14 @@ const renderNodes = () => {
           </div>
         </div>
 
-        <div style="display:grid;gap:5px;font-size:11px;min-width:0;">
+        <div class="capability-rules" style="display:grid;gap:5px;font-size:11px;min-width:0;">
           <div style="display:flex;gap:8px;align-items:center;min-width:0;">
             <span style="min-width:46px;padding:3px 6px;border-radius:5px;background:rgba(118,190,28,.14);color:#3e7f0e;font-weight:800;text-align:center;">GET</span>
-            <code style="color:#244e49;overflow-wrap:anywhere;">github.com/kubernetes/kubernetes.git</code>
+            <code class="capability-target" style="color:#244e49;overflow-wrap:anywhere;">github.com/kubernetes/kubernetes.git</code>
           </div>
           <div style="display:flex;gap:8px;align-items:center;min-width:0;">
             <span style="min-width:46px;padding:3px 6px;border-radius:5px;background:rgba(118,190,28,.14);color:#3e7f0e;font-weight:800;text-align:center;">POST</span>
-            <code style="color:#244e49;overflow-wrap:anywhere;">github.com/kubernetes/kubernetes.git</code>
+            <code class="capability-target" style="color:#244e49;overflow-wrap:anywhere;">github.com/kubernetes/kubernetes.git</code>
           </div>
           <div style="color:#b42318;font-weight:700;">✕ Everything else is denied</div>
         </div>

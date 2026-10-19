@@ -769,15 +769,18 @@ spec:
     name: python-sandbox-edera-template`;
 
 // Edera-native Sandbox / Snapshot / Fork resources (runtime.edera.dev).
-// These are pre-applied when the lab starts (see EDERA_PREAPPLIED_PODS and the
-// runtime.edera.dev kubectl handlers); the files exist so users can read how
-// the resources were configured.
+// None of these exist when the lab starts: the guide walks the user through
+// reading and applying each manifest (see handleEderaRuntimeResources).
 const EDERA_SANDBOX_NAME = "sandbox-sample";
 const EDERA_SNAPSHOT_NAME = "sandbox-sample-snap";
 const EDERA_FORK_NAME = "sandbox-sample-snap-fork";
-// Snapshot.remote=Local pins the snapshot (and therefore the forks) to the
-// sandbox's node.
+const EDERA_FORK_REPLICAS = 2;
+// The sandbox is scheduled here; remote: Local keeps the snapshot (and so
+// the forks) on the same node.
 const EDERA_SANDBOX_NODE = "node-2";
+const EDERA_SANDBOX_IMAGE =
+  "registry.k8s.io/agent-sandbox/python-runtime-sandbox:v0.1.0";
+const EDERA_ZONE_KERNEL = "6.18.34-edera-zone";
 
 const EDERA_SANDBOX_YAML = `apiVersion: runtime.edera.dev/v1alpha1
 kind: Sandbox
@@ -791,7 +794,7 @@ spec:
     spec:
       containers:
       - name: workload
-        image: registry.k8s.io/pause:3.10`;
+        image: ${EDERA_SANDBOX_IMAGE}`;
 
 const EDERA_SNAPSHOT_YAML = `apiVersion: runtime.edera.dev/v1alpha1
 kind: Snapshot
@@ -816,37 +819,6 @@ spec:
   # The snapshot is local to the sandbox's node, so the forks run there too.
   remote: Local
   replicas: 2`;
-
-const EDERA_PREAPPLIED_PODS: LocalPod[] = [
-  {
-    name: EDERA_SANDBOX_NAME,
-    namespace: "default",
-    status: "Running",
-    age: "10m",
-    image: "registry.k8s.io/pause:3.10",
-    ip: "10.244.0.51",
-    node: EDERA_SANDBOX_NODE,
-    labels: {
-      "app.kubernetes.io/name": EDERA_SANDBOX_NAME,
-      "runtime.edera.dev/sandbox": EDERA_SANDBOX_NAME,
-    },
-    runtimeClassName: "edera",
-  },
-  ...[0, 1].map((index) => ({
-    name: `${EDERA_FORK_NAME}-${index}`,
-    namespace: "default",
-    status: "Running",
-    age: "9m",
-    image: "registry.k8s.io/pause:3.10",
-    ip: `10.244.0.${52 + index}`,
-    node: EDERA_SANDBOX_NODE,
-    labels: {
-      "app.kubernetes.io/name": EDERA_SANDBOX_NAME,
-      "runtime.edera.dev/fork": EDERA_FORK_NAME,
-    },
-    runtimeClassName: "edera",
-  })),
-];
 
 const AGENT_SANDBOX_ROUTER_COMMAND = `kubectl apply -f https://raw.githubusercontent.com/kubernetes-sigs/agent-sandbox/${AGENT_SANDBOX_VERSION}/clients/python/agentic-sandbox-client/sandbox-router/sandbox_router.yaml`;
 
@@ -983,118 +955,110 @@ const AGENT_SANDBOX_DEMO_STEPS: DemoStep[] = [
     command: `protect -c ${EDERA_PROTECT_ENDPOINT} zone list`,
   },
   {
-    id: "agent-sandbox-version",
-    title: "Pin a v1beta1 Agent Sandbox release",
+    id: "edera-crds",
+    title: "Verify the Edera Sandbox CRDs",
     description:
-      "Use a release that serves the <code class='guide-code'>agents.x-k8s.io/v1beta1</code> API. This guide pins <code class='guide-code'>v0.5.0rc1</code> so the manifest and controller API stay aligned. Newer v1beta1-compatible releases can be substituted in a real cluster.",
-    command: `export AGENT_SANDBOX_VERSION="${AGENT_SANDBOX_VERSION}"`,
+      "The Edera runtime controller already running in <code class='guide-code'>edera-runtime</code> serves three resources under <code class='guide-code'>runtime.edera.dev/v1alpha1</code>: <code class='guide-code'>Sandbox</code>, <code class='guide-code'>Snapshot</code> and <code class='guide-code'>Fork</code>. Confirm their CRDs are installed.",
+    command:
+      "kubectl get crd sandboxes.runtime.edera.dev snapshots.runtime.edera.dev forks.runtime.edera.dev",
   },
   {
-    id: "agent-sandbox-install",
-    title: "Install the Agent Sandbox controller",
+    id: "edera-sandbox-manifest",
+    title: "Read the Sandbox manifest",
     description:
-      `Install the Agent Sandbox controller and CRDs. The simulator accepts the pinned upstream release manifest. <a href="https://agent-sandbox.sigs.k8s.io/docs/" target="_blank" rel="noopener noreferrer">Read the Agent Sandbox docs →</a>`,
-    command: `kubectl apply -f https://github.com/kubernetes-sigs/agent-sandbox/releases/download/${AGENT_SANDBOX_VERSION}/manifest.yaml`,
+      "A <code class='guide-code'>Sandbox</code> wraps a pod template. The Edera runtime controller runs that pod in its own Edera zone with a dedicated guest kernel, so the workload never shares the node's kernel.",
+    command: "cat agent-sandbox/edera-sandbox.yaml",
   },
   {
-    id: "agent-sandbox-crd",
-    title: "Verify the Sandbox CRD",
+    id: "edera-sandbox-apply",
+    title: "Create the Sandbox",
     description:
-      "Confirm that <code class='guide-code'>sandboxes.agents.x-k8s.io</code> is installed and serves <code class='guide-code'>v1beta1</code>.",
-    command: "kubectl get crd sandboxes.agents.x-k8s.io",
+      "Apply the Sandbox. The controller creates the backing pod with <code class='guide-code'>runtimeClassName: edera</code>.",
+    command: "kubectl apply -f agent-sandbox/edera-sandbox.yaml",
   },
   {
-    id: "agent-sandbox-controller",
-    title: "Wait for the controller",
+    id: "edera-sandbox-ready",
+    title: "Wait for the Sandbox to become Ready",
     description:
-      "Verify that the <code class='guide-code'>agent-sandbox-controller</code> Deployment is running in <code class='guide-code'>agent-sandbox-system</code>.",
-    command: "kubectl -n agent-sandbox-system rollout status deploy/agent-sandbox-controller",
+      "Wait for the controller to report the Sandbox as Ready. Watch its zone appear in the Edera Zones panel.",
+    command: "kubectl wait --for=condition=Ready sandbox/sandbox-sample --timeout=120s",
   },
   {
-    id: "agent-sandbox-manifest",
-    title: "Inspect the Edera-backed Sandbox",
+    id: "edera-sandbox-inspect",
+    title: "Inspect the Sandbox and its pod",
     description:
-      "The important integration point is <code class='guide-code'>runtimeClassName: edera</code>. The sandbox also disables automatic service-account tokens, drops Linux capabilities, runs non-root, and gives the Python runtime explicit CPU and memory limits.",
-    command: "cat agent-sandbox/sandbox.yaml",
-  },
-  {
-    id: "agent-sandbox-apply",
-    title: "Create the Agent Sandbox",
-    description:
-      "Apply the Sandbox resource. Agent Sandbox hides the underlying StatefulSet, Service, and storage lifecycle behind the <code class='guide-code'>Sandbox</code> API.",
-    command: "kubectl apply -f agent-sandbox/sandbox.yaml",
-  },
-  {
-    id: "agent-sandbox-ready",
-    title: "Wait for the sandbox to become Ready",
-    description:
-      "Wait for the controller to report a Ready Sandbox. Because the pod uses the Edera RuntimeClass, its workload is placed in an Edera zone with a dedicated guest kernel.",
-    command: "kubectl wait --for=condition=Ready sandbox/my-sandbox --timeout=120s",
-  },
-  {
-    id: "agent-sandbox-inspect",
-    title: "Inspect the Sandbox and Pod",
-    description:
-      "List the Sandbox and its backing pod. Notice the <code class='guide-code'>edera</code> runtime and the stable Sandbox identity.",
+      "List the Sandbox with its pod. Note the <code class='guide-code'>edera</code> runtime and the node it was scheduled on; the snapshot and forks will stay on that node.",
     command: "kubectl get sandbox,pods -o wide",
   },
   {
-    id: "agent-sandbox-exec",
-    title: "Execute Python inside the isolated sandbox",
+    id: "edera-sandbox-exec",
+    title: "Execute Python inside the Sandbox",
     description:
-      "Run code directly in the sandbox runtime. The execution happens inside the Edera zone rather than on the Kubernetes node's shared kernel.",
-    command: "kubectl exec -it my-sandbox -- python3 -c \"print(2+2)\"",
+      "Run code in the sandboxed Python runtime. It executes inside the Edera zone rather than on the node's shared kernel.",
+    command: "kubectl exec -it sandbox-sample -- python3 -c \"print(2+2)\"",
   },
   {
-    id: "agent-sandbox-kernel",
+    id: "edera-sandbox-kernel",
     title: "Verify the dedicated Edera kernel",
     description:
-      "Compare the kernel reported from inside the sandbox with the host. A different kernel is the clearest demonstration that the agent is not sharing the node kernel.",
-    command: "kubectl exec my-sandbox -- uname -r",
+      "Compare the kernel reported from inside the Sandbox with the host. A different kernel is the clearest sign the agent isn't sharing the node kernel.",
+    command: "kubectl exec sandbox-sample -- uname -r",
   },
   {
-    id: "agent-sandbox-warm-pool",
-    title: "Create an Edera warm pool",
+    id: "edera-snapshot-manifest",
+    title: "Read the Snapshot manifest",
     description:
-      "Create a reusable <code class='guide-code'>SandboxTemplate</code> and a two-replica <code class='guide-code'>SandboxWarmPool</code>. Pre-warmed Edera zones reduce cold-start latency for agents at scale.",
-    command: "kubectl apply -f agent-sandbox/template-and-warm-pool.yaml",
+      "A <code class='guide-code'>Snapshot</code> freezes a running Sandbox. <code class='guide-code'>remote: Local</code> keeps it on the Sandbox's node; <code class='guide-code'>Remote</code> needs shared snapshot storage, which this install doesn't enable.",
+    command: "cat agent-sandbox/edera-snapshot.yaml",
   },
   {
-    id: "agent-sandbox-pool-list",
-    title: "Inspect the warm pool",
+    id: "edera-snapshot-apply",
+    title: "Snapshot the Sandbox",
     description:
-      "List the template, warm pool, Sandboxes, and backing pods. Each warm-pool pod uses <code class='guide-code'>runtimeClassName: edera</code>.",
-    command: "kubectl get sandboxtemplates,sandboxwarmpools,sandboxes,pods",
+      "Apply the Snapshot to capture <code class='guide-code'>sandbox-sample</code> as it is running right now.",
+    command: "kubectl apply -f agent-sandbox/edera-snapshot.yaml",
   },
   {
-    id: "agent-sandbox-router",
-    title: "Install the Sandbox Router",
+    id: "edera-snapshot-inspect",
+    title: "Inspect the Snapshot",
     description:
-      `VM-based runtimes should use the Sandbox Router rather than direct pod port-forwarding. The router selects the target sandbox using <code class='guide-code'>X-Sandbox-ID</code> and <code class='guide-code'>X-Sandbox-Port</code>.`,
-    command: AGENT_SANDBOX_ROUTER_COMMAND,
+      "Check the Snapshot is Ready and stored on the same node as the Sandbox.",
+    command: "kubectl get snapshot sandbox-sample-snap",
   },
   {
-    id: "agent-sandbox-api",
-    title: "Call the sandbox execution API",
+    id: "edera-fork-manifest",
+    title: "Read the Fork manifest",
     description:
-      "Port-forward the Router Service, then send an execution request to the Python runtime. This is the same shape used by Agent Sandbox clients and agent orchestrators.",
-    command:
-      `kubectl port-forward svc/sandbox-router-svc 8080:8080 & curl -s http://localhost:8080/execute -H 'Content-Type: application/json' -H 'X-Sandbox-ID: my-sandbox' -H 'X-Sandbox-Port: 8888' -d '{"command":"python3 -c \\\"print(2+2)\\\""}'`,
+      "A <code class='guide-code'>Fork</code> starts new copies of a Sandbox from its frozen state, so each replica skips cold start and begins exactly where the original was. Because the snapshot is local, the forks run on the same node.",
+    command: "cat agent-sandbox/edera-fork.yaml",
   },
   {
-    id: "agent-sandbox-sdk",
-    title: "Connect an Agent Sandbox SDK",
+    id: "edera-fork-apply",
+    title: "Fork the Sandbox",
     description:
-      `The Python client is available as <code class='guide-code'>k8s-agent-sandbox</code>; the project also provides a Go client. From here an orchestrator can create/claim a sandbox and run commands through the Router. <a href="https://agent-sandbox.sigs.k8s.io/docs/python-client/" target="_blank" rel="noopener noreferrer">Python client docs →</a>`,
-    command: "pip install k8s-agent-sandbox",
-    optional: true,
+      "Apply the Fork to start two replicas. Each one gets its own Edera zone.",
+    command: "kubectl apply -f agent-sandbox/edera-fork.yaml",
+  },
+  {
+    id: "edera-fork-inspect",
+    title: "Inspect the forks",
+    description:
+      "List the Fork and its pods. Both replicas are running with the <code class='guide-code'>edera</code> runtime on the Sandbox's node, and two new zones are in the Edera Zones panel.",
+    command: "kubectl get fork,pods -o wide",
+  },
+  {
+    id: "edera-fork-exec",
+    title: "Run code in a fork",
+    description:
+      "Each fork is an independent, isolated copy: work done here doesn't touch the original Sandbox or the other fork.",
+    command: "kubectl exec sandbox-sample-snap-fork-0 -- python3 -c \"print(2+2)\"",
   },
   {
     id: "agent-sandbox-security-review",
     title: "Review the agent security boundary",
     description:
       "Edera contains the compute environment: the agent gets its own kernel, filesystem, memory, and process space. Object capabilities then make authority explicit and narrowly scoped. Credentials can remain outside the agent while capabilities expose only the operations the workload actually needs.",
-    command: "cat agent-sandbox/sandbox.yaml",
+    command: "cat agent-sandbox/edera-sandbox.yaml",
     optional: true,
   },
   {
@@ -1106,11 +1070,11 @@ const AGENT_SANDBOX_DEMO_STEPS: DemoStep[] = [
     optional: true,
   },
   {
-    id: "agent-sandbox-cleanup",
-    title: "Clean up the demo Sandbox",
+    id: "edera-cleanup",
+    title: "Clean up the Sandbox, Snapshot and Fork",
     description:
-      "Delete the example Sandbox when you are finished. The controller owns the underlying long-running workload lifecycle.",
-    command: "kubectl delete sandbox my-sandbox",
+      "Delete the demo resources when you're finished. Their pods and Edera zones are removed with them.",
+    command: "kubectl delete fork,snapshot,sandbox --all",
     optional: true,
   },
 ];
@@ -1774,7 +1738,9 @@ vfio_pci`;
   let falcoLogLines: string[] = [];
   let falcoStreamMode: "node" | "helm" | null = null;
 
-  const activeRuntimeClasses = new Set<string>();
+  // The Edera RuntimeClass ships with the Edera install, so it exists from the
+  // start; pods such as agent-pod are admitted with runtimeClassName: edera.
+  const activeRuntimeClasses = new Set<string>(["edera"]);
 
   let agentSandboxVersion = AGENT_SANDBOX_VERSION;
   let agentSandboxInstalled = false;
@@ -1820,7 +1786,7 @@ vfio_pci`;
 
   let pods: LocalPod[] = [
     {
-      name: "demo-pod",
+      name: "agent-pod",
       namespace: "default",
       status: "Running",
       age: "2m",
@@ -1828,9 +1794,9 @@ vfio_pci`;
       ip: "10.244.0.5",
       node: "node-2",
       labels: { app: "demo" },
+      // Runs as a workload inside the pre-created agent-zone (see seedAgentZone).
+      runtimeClassName: "edera",
     },
-    // Edera Sandbox + Fork pods are already running when the lab starts.
-    ...EDERA_PREAPPLIED_PODS.map((pod) => ({ ...pod, labels: { ...pod.labels } })),
   ];
 
   const ensureCoreClusterPods = () => {
@@ -2830,6 +2796,53 @@ const renderNodes = () => {
     return `fdd4:1476:6c7e::${id}/48`;
   };
 
+  // The lab starts with agent-pod already running as a workload inside an
+  // Edera zone called agent-zone. Built directly (rather than through
+  // launchProtectZone) so nothing is printed to the terminal at startup.
+  const AGENT_ZONE_NAME = "agent-zone";
+  const AGENT_POD_NAME = "agent-pod";
+
+  const seedAgentZone = () => {
+    if (protectZones.some((zone) => zone.name === AGENT_ZONE_NAME)) return;
+
+    const zone: ProtectZone = {
+      name: AGENT_ZONE_NAME,
+      uuid: crypto.randomUUID(),
+      state: "ready",
+      ipv4: nextZoneIp(),
+      ipv6: nextZoneIpv6(),
+      minCpus: 1,
+      maxCpus: 2,
+      targetCpus: 2,
+    };
+    protectZones.push(zone);
+    addEvent(
+      "Normal",
+      "ZoneReady",
+      `zone/${AGENT_ZONE_NAME}`,
+      `Edera zone ${AGENT_ZONE_NAME} is ready`,
+    );
+
+    const pod = pods.find((item) => item.name === AGENT_POD_NAME);
+    if (!pod) return;
+
+    protectWorkloads.push({
+      name: pod.name,
+      uuid: crypto.randomUUID(),
+      zone: zone.uuid,
+      state: "running",
+      image: pod.image,
+      command: [],
+      sourcePodName: pod.name,
+    });
+    addEvent(
+      "Info",
+      "WorkloadAttached",
+      `workload/${pod.name}`,
+      `Attached pod/${pod.name} to Edera zone ${AGENT_ZONE_NAME}`,
+    );
+  };
+
   const launchProtectZone = (
     name: string,
     minCpus = 1,
@@ -2880,7 +2893,8 @@ const renderNodes = () => {
       );
       return;
     }
-    const nameWidth = 15;
+    // Widen the NAME column for long zone names (e.g. fork pods).
+    const nameWidth = Math.max(15, ...zones.map((zone) => zone.name.length + 2));
     const uuidWidth = 38;
     const stateWidth = 13;
     const ipv4Width = 18;
@@ -3168,6 +3182,15 @@ const renderNodes = () => {
         continue;
       }
 
+      // Pods owned by runtime.edera.dev Sandbox/Fork resources are managed by
+      // that controller, not attached to whichever zone was launched last.
+      if (
+        pod.labels["runtime.edera.dev/sandbox"] ||
+        pod.labels["runtime.edera.dev/fork"]
+      ) {
+        continue;
+      }
+
       const alreadyAttached = protectWorkloads.some(
         (workload) =>
           workload.sourcePodName === pod.name &&
@@ -3225,7 +3248,7 @@ const renderNodes = () => {
       return;
     }
 
-    const nameWidth = 18;
+    const nameWidth = Math.max(18, ...workloads.map((workload) => workload.name.length + 2));
     const uuidWidth = 38;
     const zoneWidth = 38;
     const stateWidth = 14;
@@ -3816,34 +3839,40 @@ const renderNodes = () => {
           <div class="cli-help-section-title">AI Agent Sandbox</div>
 
           <div class="cli-help-command">
-            <code>export AGENT_SANDBOX_VERSION=...</code>
-            <span>Pin the Agent Sandbox release used by the guide.</span>
+            <code>cat agent-sandbox/edera-sandbox.yaml</code>
+            <span>Read the Edera Sandbox, Snapshot or Fork manifest.</span>
           </div>
 
           <div class="cli-help-command">
-            <code>kubectl apply -f &lt;Agent Sandbox release manifest&gt;</code>
-            <span>Install the Agent Sandbox controller and CRDs.</span>
+            <code>kubectl apply -f agent-sandbox/edera-sandbox.yaml</code>
+            <span>Create the Sandbox, then the Snapshot and Fork the same way.</span>
           </div>
 
           <div class="cli-help-command">
-            <code>kubectl get sandbox,pods</code>
-            <span>Inspect the Edera-backed Sandbox and its backing pod.</span>
+            <code>kubectl wait --for=condition=Ready sandbox/sandbox-sample</code>
+            <span>Wait for the Sandbox to run in its own Edera zone.</span>
           </div>
 
           <div class="cli-help-command">
-            <code>kubectl exec -it my-sandbox -- python3 -c "print(2+2)"</code>
+            <code>kubectl get sandbox,snapshot,fork</code>
+            <span>List the Edera Sandbox, Snapshot and Fork (add ,pods to see their pods).</span>
+          </div>
+
+          <div class="cli-help-command">
+            <code>kubectl exec -it sandbox-sample -- python3 -c "print(2+2)"</code>
             <span>Execute Python inside the sandbox runtime.</span>
           </div>
 
           <div class="cli-help-command">
-            <code>kubectl exec my-sandbox -- uname -r</code>
+            <code>kubectl exec sandbox-sample -- uname -r</code>
             <span>Verify the sandbox is using an Edera zone kernel.</span>
           </div>
 
           <div class="cli-help-command">
-            <code>kubectl port-forward svc/sandbox-router-svc 8080:8080</code>
-            <span>Expose the Agent Sandbox Router for SDK/API traffic.</span>
+            <code>kubectl delete fork,snapshot,sandbox --all</code>
+            <span>Remove the demo resources and their zones.</span>
           </div>
+        </div>
 
         <div class="cli-help-section">
           <div class="cli-help-section-title">Edera</div>
@@ -4543,11 +4572,16 @@ const renderNodes = () => {
         );
 
         if (activeDemoMode === "agent-sandbox") {
-          if (protectZones.length === 0) {
+          // Track the guide's test zone by name: the lab already starts with
+          // agent-zone, so "any zone exists" no longer means the user launched one.
+          const testZone = protectZones.find(
+            (zone) => zone.name === "my-test-zone-1",
+          );
+          if (!testZone) {
             markDemoStepComplete("protect-zone-list-initial");
-          } else if (protectZones.some((zone) => zone.state === "ready")) {
+          } else if (testZone.state === "ready") {
             markDemoStepComplete("protect-zone-list-ready");
-          } else if (hasDestroyedZone) {
+          } else if (testZone.state === "destroyed") {
             markDemoStepComplete("protect-zone-list-final");
           }
         }
@@ -4998,40 +5032,120 @@ Kernel isolation: enabled</span>`);
 
   // -----------------------------------------------------------------------
   // Edera-native Sandbox / Snapshot / Fork (runtime.edera.dev/v1alpha1).
-  // All three are pre-applied when the lab starts, so the simulator treats
-  // them as static, already-reconciled resources: `apply` reports unchanged,
-  // and `get` / `describe` render them.
+  // None exist when the lab starts. The guide has the user read and apply
+  // agent-sandbox/edera-{sandbox,snapshot,fork}.yaml in order; this block
+  // simulates the Edera runtime controller reconciling them. Each pod the
+  // controller creates runs in its own Edera zone, shown in the Zones panel.
   // -----------------------------------------------------------------------
   type EderaRuntimeKind = "Sandbox" | "Snapshot" | "Fork";
 
   const EDERA_RUNTIME_MANIFESTS: Record<
     EderaRuntimeKind,
-    { file: string; name: string; plural: string; yaml: string }
+    { file: string; name: string; yaml: string }
   > = {
     Sandbox: {
       file: "agent-sandbox/edera-sandbox.yaml",
       name: EDERA_SANDBOX_NAME,
-      plural: "sandboxes",
       yaml: EDERA_SANDBOX_YAML,
     },
     Snapshot: {
       file: "agent-sandbox/edera-snapshot.yaml",
       name: EDERA_SNAPSHOT_NAME,
-      plural: "snapshots",
       yaml: EDERA_SNAPSHOT_YAML,
     },
     Fork: {
       file: "agent-sandbox/edera-fork.yaml",
       name: EDERA_FORK_NAME,
-      plural: "forks",
       yaml: EDERA_FORK_YAML,
     },
   };
 
-  // Map a kubectl resource token to an Edera runtime kind. A bare
-  // `sandbox` is ambiguous once the upstream Agent Sandbox CRD
-  // (agents.x-k8s.io) is installed; only claim it for runtime.edera.dev when
-  // that CRD isn't present yet, or when the Edera sandbox is named explicitly.
+  const EDERA_CRD_NAMES = [
+    "sandboxes.runtime.edera.dev",
+    "snapshots.runtime.edera.dev",
+    "forks.runtime.edera.dev",
+  ];
+
+  // Creation time per kind; absent from the map means "not created".
+  const ederaCreatedAt = new Map<EderaRuntimeKind, number>();
+  let ederaSandboxReady = false;
+
+  const ederaExists = (kind: EderaRuntimeKind) => ederaCreatedAt.has(kind);
+
+  const ederaResourceRef = (kind: EderaRuntimeKind) =>
+    `${kind.toLowerCase()}.runtime.edera.dev/${EDERA_RUNTIME_MANIFESTS[kind].name}`;
+
+  const ederaAge = (kind: EderaRuntimeKind) => {
+    const created = ederaCreatedAt.get(kind);
+    if (created === undefined) return "<none>";
+    const seconds = Math.max(1, Math.floor((Date.now() - created) / 1000));
+    return seconds < 120 ? `${seconds}s` : `${Math.floor(seconds / 60)}m`;
+  };
+
+  const isEderaSandboxPod = (pod: LocalPod) =>
+    pod.labels["runtime.edera.dev/sandbox"] === EDERA_SANDBOX_NAME;
+  const isEderaForkPod = (pod: LocalPod) =>
+    pod.labels["runtime.edera.dev/fork"] === EDERA_FORK_NAME;
+  const ederaManagedPods = () =>
+    pods.filter((pod) => isEderaSandboxPod(pod) || isEderaForkPod(pod));
+  const ederaForkPods = () => pods.filter(isEderaForkPod);
+
+  // One Edera zone per controller-created pod, mirroring how the Edera
+  // runtime isolates each pod behind its own guest kernel.
+  const startEderaZoneForPod = (pod: LocalPod) => {
+    if (protectZones.some((zone) => zone.name === pod.name && zone.state !== "destroyed")) {
+      return;
+    }
+    const zone: ProtectZone = {
+      name: pod.name,
+      uuid: crypto.randomUUID(),
+      state: "ready",
+      ipv4: nextZoneIp(),
+      ipv6: nextZoneIpv6(),
+      minCpus: 1,
+      maxCpus: 2,
+      targetCpus: 2,
+    };
+    protectZones.push(zone);
+    protectWorkloads.push({
+      name: pod.name,
+      uuid: crypto.randomUUID(),
+      zone: zone.uuid,
+      state: "running",
+      image: pod.image,
+      command: [],
+      sourcePodName: pod.name,
+    });
+    addEvent("Normal", "ZoneReady", `zone/${pod.name}`, `Edera zone ${pod.name} is ready`);
+  };
+
+  const stopEderaZoneForPod = (podName: string) => {
+    const zoneIds = protectZones
+      .filter((zone) => zone.name === podName)
+      .map((zone) => zone.uuid);
+    protectWorkloads = protectWorkloads.filter(
+      (workload) => workload.sourcePodName !== podName && !zoneIds.includes(workload.zone),
+    );
+    protectZones = protectZones.filter((zone) => zone.name !== podName);
+    if (zoneIds.length) {
+      addEvent("Normal", "ZoneDestroyed", `zone/${podName}`, `Edera zone ${podName} destroyed`);
+    }
+  };
+
+  const removeEderaPods = (predicate: (pod: LocalPod) => boolean) => {
+    for (const pod of pods.filter(predicate)) stopEderaZoneForPod(pod.name);
+    pods = pods.filter((pod) => !predicate(pod));
+  };
+
+  const printEderaError = (message: string) =>
+    printHtml(`<span style="color:#ff7373;">${escapeHtml(message)}</span>`);
+
+  // Map a kubectl resource token to an Edera runtime kind. Both
+  // runtime.edera.dev and the upstream Agent Sandbox (agents.x-k8s.io)
+  // define `kind: Sandbox`. The lab defaults a bare `sandbox` to the Edera
+  // resource; the upstream one (agent-sandbox/sandbox.yaml, kept for
+  // reading) is reached with `sandboxes.agents.x-k8s.io` or by naming
+  // my-sandbox.
   const resolveEderaRuntimeKind = (
     token: string,
     requestedNames: string[],
@@ -5045,39 +5159,50 @@ Kernel isolation: enabled</span>`);
     if (["fork", "forks"].includes(base)) return "Fork";
     if (["sandbox", "sandboxes"].includes(base)) {
       if (groupName) return "Sandbox";
-      if (!agentSandboxInstalled) return "Sandbox";
-      if (requestedNames.includes(EDERA_SANDBOX_NAME)) return "Sandbox";
+      if (requestedNames.includes("my-sandbox")) return null;
+      return "Sandbox";
     }
     return null;
   };
 
-  const ederaForkPods = () =>
-    pods.filter(
-      (pod) => pod.labels["runtime.edera.dev/fork"] === EDERA_FORK_NAME,
-    );
-
   const ederaRuntimeTable = (kind: EderaRuntimeKind) => {
     const name = { text: EDERA_RUNTIME_MANIFESTS[kind].name, color: "#b8ff3c" };
+    const age = ederaAge(kind);
     if (kind === "Sandbox") {
-      const pod = pods.find((item) => item.name === EDERA_SANDBOX_NAME);
       return formatTerminalTable(
         ["NAME", "READY", "NODE", "AGE"],
-        [[name, pod?.status === "Running" ? "True" : "False", pod?.node || "<none>", "10m"]],
+        [[
+          name,
+          ederaSandboxReady ? "True" : "False",
+          ederaSandboxReady ? EDERA_SANDBOX_NODE : "<none>",
+          age,
+        ]],
       );
     }
     if (kind === "Snapshot") {
       return formatTerminalTable(
-        ["NAME", "SANDBOX", "REMOTE", "READY", "AGE"],
-        [[name, EDERA_SANDBOX_NAME, "Local", "True", "9m"]],
+        ["NAME", "SANDBOX", "REMOTE", "NODE", "READY", "AGE"],
+        [[name, EDERA_SANDBOX_NAME, "Local", EDERA_SANDBOX_NODE, "True", age]],
       );
     }
-    const forks = ederaForkPods();
-    const ready = forks.filter((pod) => pod.status === "Running").length;
+    const ready = ederaForkPods().filter((pod) => pod.status === "Running").length;
     return formatTerminalTable(
       ["NAME", "SOURCE", "REMOTE", "READY", "AGE"],
-      [[name, `sandbox/${EDERA_SANDBOX_NAME}`, "Local", `${ready}/2`, "9m"]],
+      [[name, `sandbox/${EDERA_SANDBOX_NAME}`, "Local", `${ready}/${EDERA_FORK_REPLICAS}`, age]],
     );
   };
+
+  const ederaPodTable = (selected: LocalPod[]) =>
+    formatTerminalTable(
+      ["POD", "STATUS", "RUNTIME", "IP", "NODE"],
+      selected.map((pod) => [
+        { text: pod.name, color: "#b8ff3c" },
+        pod.status,
+        effectiveRuntimeClass(pod) || "<none>",
+        pod.ip,
+        pod.node,
+      ]),
+    );
 
   const ederaRuntimeDescribe = (kind: EderaRuntimeKind) => {
     const { name } = EDERA_RUNTIME_MANIFESTS[kind];
@@ -5092,10 +5217,11 @@ Kernel isolation: enabled</span>`);
         `Spec:`,
         `  Pod Template:`,
         `    Containers:`,
-        `      workload: registry.k8s.io/pause:3.10`,
+        `      workload: ${EDERA_SANDBOX_IMAGE}`,
         `Status:`,
-        `  Node:   ${EDERA_SANDBOX_NODE}`,
-        `  Ready:  True`,
+        `  Node:     ${ederaSandboxReady ? EDERA_SANDBOX_NODE : "<none>"}`,
+        `  Runtime:  edera (dedicated zone kernel ${EDERA_ZONE_KERNEL})`,
+        `  Ready:    ${ederaSandboxReady ? "True" : "False"}`,
       );
     } else if (kind === "Snapshot") {
       lines.push(
@@ -5113,7 +5239,7 @@ Kernel isolation: enabled</span>`);
         `  Source:`,
         `    Sandbox:  ${EDERA_SANDBOX_NAME}`,
         `  Remote:    Local`,
-        `  Replicas:  2`,
+        `  Replicas:  ${EDERA_FORK_REPLICAS}`,
         `Status:`,
         `  Ready Replicas:  ${forks.filter((pod) => pod.status === "Running").length}`,
         `  Forks:`,
@@ -5124,24 +5250,240 @@ Kernel isolation: enabled</span>`);
     return lines.join("\n");
   };
 
+  const applyEderaRuntimeResource = (kind: EderaRuntimeKind) => {
+    const ref = ederaResourceRef(kind);
+
+    if (ederaExists(kind)) {
+      printHtml(`<span style="color:#a8cfca;">${escapeHtml(ref)} unchanged</span>`);
+      return;
+    }
+
+    if (kind === "Sandbox") {
+      ederaCreatedAt.set(kind, Date.now());
+      ederaSandboxReady = false;
+      pods.push({
+        name: EDERA_SANDBOX_NAME,
+        namespace: "default",
+        status: "Pending",
+        age: "1s",
+        image: EDERA_SANDBOX_IMAGE,
+        ip: "<none>",
+        node: "<none>",
+        labels: {
+          "app.kubernetes.io/name": EDERA_SANDBOX_NAME,
+          "runtime.edera.dev/sandbox": EDERA_SANDBOX_NAME,
+        },
+        runtimeClassName: "edera",
+      });
+      addEvent(
+        "Normal",
+        "SandboxCreated",
+        `sandbox/${EDERA_SANDBOX_NAME}`,
+        "Edera runtime controller is creating the sandbox pod with runtimeClassName=edera",
+      );
+      markDemoStepComplete("edera-sandbox-apply");
+    } else {
+      // Snapshot and Fork both capture the running sandbox, so it has to
+      // exist and be Ready first.
+      if (!ederaExists("Sandbox")) {
+        printEderaError(
+          `Error from server (NotFound): sandboxes.runtime.edera.dev "${EDERA_SANDBOX_NAME}" not found`,
+        );
+        return;
+      }
+      if (!ederaSandboxReady) {
+        printEderaError(
+          `Error: sandbox "${EDERA_SANDBOX_NAME}" is not Ready yet. Run: kubectl wait --for=condition=Ready sandbox/${EDERA_SANDBOX_NAME}`,
+        );
+        return;
+      }
+
+      ederaCreatedAt.set(kind, Date.now());
+
+      if (kind === "Snapshot") {
+        addEvent(
+          "Normal",
+          "SnapshotReady",
+          `snapshot/${EDERA_SNAPSHOT_NAME}`,
+          `Captured ${EDERA_SANDBOX_NAME}; stored locally on ${EDERA_SANDBOX_NODE}`,
+        );
+        markDemoStepComplete("edera-snapshot-apply");
+      } else {
+        for (let index = 0; index < EDERA_FORK_REPLICAS; index++) {
+          const pod: LocalPod = {
+            name: `${EDERA_FORK_NAME}-${index}`,
+            namespace: "default",
+            status: "Running",
+            age: "1s",
+            image: EDERA_SANDBOX_IMAGE,
+            ip: `10.244.0.${52 + index}`,
+            node: EDERA_SANDBOX_NODE,
+            labels: {
+              "app.kubernetes.io/name": EDERA_SANDBOX_NAME,
+              "runtime.edera.dev/fork": EDERA_FORK_NAME,
+            },
+            runtimeClassName: "edera",
+          };
+          pods.push(pod);
+          startEderaZoneForPod(pod);
+        }
+        addEvent(
+          "Normal",
+          "ForkReady",
+          `fork/${EDERA_FORK_NAME}`,
+          `${EDERA_FORK_REPLICAS} forks of ${EDERA_SANDBOX_NAME} resumed from a local snapshot on ${EDERA_SANDBOX_NODE}`,
+        );
+        markDemoStepComplete("edera-fork-apply");
+      }
+    }
+
+    printHtml(`<span style="color:#b8ff3c;">${escapeHtml(ref)} created</span>`);
+    updateDashboard();
+  };
+
+  const deleteEderaRuntimeResource = (kind: EderaRuntimeKind): boolean => {
+    if (!ederaExists(kind)) return false;
+    ederaCreatedAt.delete(kind);
+    if (kind === "Sandbox") {
+      ederaSandboxReady = false;
+      removeEderaPods(isEderaSandboxPod);
+    } else if (kind === "Fork") {
+      removeEderaPods(isEderaForkPod);
+    }
+    addEvent(
+      "Normal",
+      `${kind}Deleted`,
+      `${kind.toLowerCase()}/${EDERA_RUNTIME_MANIFESTS[kind].name}`,
+      `${kind} ${EDERA_RUNTIME_MANIFESTS[kind].name} deleted`,
+    );
+    printHtml(
+      `<span style="color:#b8ff3c;">${kind.toLowerCase()}.runtime.edera.dev "${escapeHtml(
+        EDERA_RUNTIME_MANIFESTS[kind].name,
+      )}" deleted</span>`,
+    );
+    return true;
+  };
+
+  const ederaKindForFile = (path: string): EderaRuntimeKind | null => {
+    const normalized = path.replace(/^['"]|['"]$/g, "");
+    const kind = (Object.keys(EDERA_RUNTIME_MANIFESTS) as EderaRuntimeKind[]).find(
+      (item) => normalized.endsWith(EDERA_RUNTIME_MANIFESTS[item].file),
+    );
+    return kind || null;
+  };
+
   const handleEderaRuntimeResources = (tokens: string[]): boolean => {
     const verb = tokens[1];
 
-    if (verb === "apply" && tokens[2] === "-f") {
-      const requested = (tokens[3] || "").replace(/^['"]|['"]$/g, "");
-      const entry = (Object.keys(EDERA_RUNTIME_MANIFESTS) as EderaRuntimeKind[])
-        .map((kind) => ({ kind, ...EDERA_RUNTIME_MANIFESTS[kind] }))
-        .find((item) => requested.endsWith(item.file));
-      if (!entry) return false;
+    // kubectl apply|delete -f agent-sandbox/edera-*.yaml (one or more -f).
+    if ((verb === "apply" || verb === "delete") && tokens.includes("-f")) {
+      const files = tokens
+        .map((token, index) => (tokens[index - 1] === "-f" ? token : null))
+        .filter((token): token is string => token !== null);
+      const kinds = files.map(ederaKindForFile);
+      if (kinds.length === 0 || kinds.some((kind) => kind === null)) return false;
+      for (const kind of kinds as EderaRuntimeKind[]) {
+        if (verb === "apply") {
+          applyEderaRuntimeResource(kind);
+        } else if (!deleteEderaRuntimeResource(kind)) {
+          printEderaError(
+            `Error from server (NotFound): ${kind.toLowerCase()}s.runtime.edera.dev "${EDERA_RUNTIME_MANIFESTS[kind].name}" not found`,
+          );
+        }
+      }
+      if (verb === "delete") {
+        updateDashboard();
+        if (ederaCreatedAt.size === 0) markDemoStepComplete("edera-cleanup");
+      }
+      return true;
+    }
+
+    // kubectl wait --for=condition=Ready sandbox/sandbox-sample
+    if (verb === "wait") {
+      const target = tokens.find((token) => token.includes("/") && !token.startsWith("-"));
+      if (!target) return false;
+      const [resource, name] = target.split("/");
+      const kind = resolveEderaRuntimeKind(resource, [name]);
+      if (!kind || name !== EDERA_RUNTIME_MANIFESTS[kind].name) return false;
+      if (!ederaExists(kind)) {
+        printEderaError(
+          `Error from server (NotFound): ${kind.toLowerCase()}s.runtime.edera.dev "${name}" not found`,
+        );
+        return true;
+      }
+      if (kind === "Sandbox" && !ederaSandboxReady) {
+        ederaSandboxReady = true;
+        const pod = pods.find(isEderaSandboxPod);
+        if (pod) {
+          pod.status = "Running";
+          pod.node = EDERA_SANDBOX_NODE;
+          pod.ip = "10.244.0.51";
+          startEderaZoneForPod(pod);
+        }
+        addEvent(
+          "Normal",
+          "SandboxReady",
+          `sandbox/${EDERA_SANDBOX_NAME}`,
+          `Sandbox is Ready in its own Edera zone on ${EDERA_SANDBOX_NODE}`,
+        );
+        updateDashboard();
+      }
+      if (kind === "Sandbox") markDemoStepComplete("edera-sandbox-ready");
       printHtml(
-        `<span style="color:#a8cfca;">${entry.plural}.runtime.edera.dev/${escapeHtml(
-          entry.name,
-        )} unchanged</span>`,
+        `<span style="color:#b8ff3c;">${escapeHtml(ederaResourceRef(kind))} condition met</span>`,
       );
       return true;
     }
 
-    if (verb !== "get" && verb !== "describe") return false;
+    // kubectl exec [-it] <sandbox or fork pod> -- <command>
+    if (verb === "exec") {
+      const separator = tokens.indexOf("--");
+      const head = separator >= 0 ? tokens.slice(2, separator) : tokens.slice(2);
+      const podName = head.find(
+        (token) =>
+          token === EDERA_SANDBOX_NAME || token.startsWith(`${EDERA_FORK_NAME}-`),
+      );
+      if (!podName) return false;
+      const pod = pods.find((item) => item.name === podName);
+      if (!pod) {
+        printEderaError(`Error from server (NotFound): pods "${podName}" not found`);
+        return true;
+      }
+      if (pod.status !== "Running") {
+        printEderaError(
+          `error: unable to upgrade connection: container not found ("workload"); is ${podName} Ready?`,
+        );
+        return true;
+      }
+      const commandText = (separator >= 0 ? tokens.slice(separator + 1) : []).join(" ");
+      const forkPod = isEderaForkPod(pod);
+      if (/uname\s+-r/.test(commandText)) {
+        printPre(`<span style="color:#b8ff3c;">${EDERA_ZONE_KERNEL}</span>`);
+        markDemoStepComplete(forkPod ? "edera-fork-exec" : "edera-sandbox-kernel");
+      } else if (/python3\s+-c/.test(commandText) && /2\s*\+\s*2/.test(commandText)) {
+        printPre(`<span style="color:#b8ff3c;">4</span>`);
+        markDemoStepComplete(forkPod ? "edera-fork-exec" : "edera-sandbox-exec");
+      } else if (/^hostname\b/.test(commandText)) {
+        printPre(`<span style="color:#b8ff3c;">${escapeHtml(podName)}</span>`);
+        if (forkPod) markDemoStepComplete("edera-fork-exec");
+      } else {
+        printHtml(
+          `<span style="color:#dff7f0;">Executed inside ${escapeHtml(podName)}: ${escapeHtml(
+            commandText || "<shell>",
+          )}</span>`,
+        );
+        if (forkPod) markDemoStepComplete("edera-fork-exec");
+      }
+      addEvent(
+        "Normal",
+        "ExecInZone",
+        `pod/${podName}`,
+        `Command ran inside the ${podName} Edera zone`,
+      );
+      return true;
+    }
+
+    if (verb !== "get" && verb !== "describe" && verb !== "delete") return false;
 
     // Split args into the resource token and positional names, skipping
     // flag values such as `-n default` or `-o yaml`.
@@ -5165,18 +5507,56 @@ Kernel isolation: enabled</span>`);
       }
     }
 
-    // Support `kubectl get sandbox,snapshot,fork` as long as every listed
-    // resource is one of ours; mixed lists fall through to other handlers.
-    const resourceParts = resourceToken.includes("/")
-      ? [resourceToken.split("/")[0]]
-      : resourceToken.split(",").filter(Boolean);
-    if (resourceToken.includes("/")) names.push(resourceToken.split("/")[1]);
-    if (resourceParts.length === 0) return false;
+    // kubectl get crd sandboxes.runtime.edera.dev ...
+    if (
+      verb === "get" &&
+      ["crd", "crds", "customresourcedefinition", "customresourcedefinitions"].includes(
+        resourceToken.toLowerCase(),
+      ) &&
+      names.length > 0 &&
+      names.every((name) => name.endsWith(".runtime.edera.dev"))
+    ) {
+      const missing = names.find((name) => !EDERA_CRD_NAMES.includes(name));
+      if (missing) {
+        printEderaError(
+          `Error from server (NotFound): customresourcedefinitions.apiextensions.k8s.io "${missing}" not found`,
+        );
+        return true;
+      }
+      printPre(
+        formatTerminalTable(
+          ["NAME", "CREATED AT"],
+          names.map((name) => [{ text: name, color: "#b8ff3c" }, "10m"]),
+        ) + `\n\n<span style="color:#00e5d4;">runtime.edera.dev/v1alpha1 served=true</span>`,
+      );
+      markDemoStepComplete("edera-crds");
+      return true;
+    }
 
-    const kinds = resourceParts.map((part) => resolveEderaRuntimeKind(part, names));
+    // Support `kubectl get sandbox,snapshot,fork` and `...,pods`, as long as
+    // every non-pod entry is one of ours; other lists fall through.
+    if (resourceToken.includes("/")) {
+      names.push(resourceToken.split("/")[1]);
+    }
+    const resourceParts = (
+      resourceToken.includes("/") ? resourceToken.split("/")[0] : resourceToken
+    )
+      .split(",")
+      .filter(Boolean);
+    const includePods = resourceParts.some((part) =>
+      ["pod", "pods", "po"].includes(part.toLowerCase()),
+    );
+    const kindParts = resourceParts.filter(
+      (part) => !["pod", "pods", "po"].includes(part.toLowerCase()),
+    );
+    if (kindParts.length === 0) return false;
+    if (includePods && verb !== "get") return false;
+
+    const kinds = kindParts.map((part) => resolveEderaRuntimeKind(part, names));
     if (kinds.some((kind) => kind === null)) return false;
     const resolvedKinds = kinds as EderaRuntimeKind[];
     const allNamespaces = tokens.includes("-A") || tokens.includes("--all-namespaces");
+    const deleteAll = tokens.includes("--all");
 
     if (!allNamespaces && namespace !== "default") {
       printHtml(
@@ -5185,40 +5565,72 @@ Kernel isolation: enabled</span>`);
       return true;
     }
 
+    // Named lookups: each name must match an existing resource of a listed kind.
     for (const name of names) {
-      const known = resolvedKinds.some(
-        (kind) => EDERA_RUNTIME_MANIFESTS[kind].name === name,
+      const match = resolvedKinds.find(
+        (kind) => EDERA_RUNTIME_MANIFESTS[kind].name === name && ederaExists(kind),
       );
-      if (!known) {
-        const plural = EDERA_RUNTIME_MANIFESTS[resolvedKinds[0]].plural;
-        printHtml(
-          `<span style="color:#ff7373;">Error from server (NotFound): ${plural}.runtime.edera.dev "${escapeHtml(
-            name,
-          )}" not found</span>`,
+      if (!match) {
+        printEderaError(
+          `Error from server (NotFound): ${resolvedKinds[0].toLowerCase()}s.runtime.edera.dev "${name}" not found`,
         );
         return true;
       }
     }
 
-    const selectedKinds = names.length
-      ? resolvedKinds.filter((kind) => names.includes(EDERA_RUNTIME_MANIFESTS[kind].name))
-      : resolvedKinds;
+    const selectedKinds = (
+      names.length
+        ? resolvedKinds.filter((kind) => names.includes(EDERA_RUNTIME_MANIFESTS[kind].name))
+        : resolvedKinds
+    ).filter(ederaExists);
 
-    if (verb === "describe") {
-      printPre(escapeHtml(selectedKinds.map(ederaRuntimeDescribe).join("\n\n\n")));
+    if (verb === "delete") {
+      if (!names.length && !deleteAll) {
+        printEderaError("error: resource(s) were provided, but no name was specified");
+        return true;
+      }
+      if (selectedKinds.length === 0) {
+        printHtml(`<span style="color:#a8cfca;">No resources found</span>`);
+        return true;
+      }
+      for (const kind of selectedKinds) deleteEderaRuntimeResource(kind);
+      updateDashboard();
+      if (ederaCreatedAt.size === 0) markDemoStepComplete("edera-cleanup");
       return true;
     }
 
-    if (output === "yaml") {
+    if (selectedKinds.length === 0) {
+      printHtml(`<span style="color:#a8cfca;">No resources found in default namespace.</span>`);
+      return true;
+    }
+
+    if (verb === "describe") {
+      printPre(escapeHtml(selectedKinds.map(ederaRuntimeDescribe).join("\n\n\n")));
+    } else if (output === "yaml") {
       printPre(
         escapeHtml(
           selectedKinds.map((kind) => EDERA_RUNTIME_MANIFESTS[kind].yaml).join("\n---\n"),
         ),
       );
-      return true;
+    } else {
+      const sections = selectedKinds.map(ederaRuntimeTable);
+      if (includePods) {
+        // Show the pods behind the listed resources.
+        const related = ederaManagedPods().filter(
+          (pod) =>
+            (selectedKinds.includes("Sandbox") && isEderaSandboxPod(pod)) ||
+            (selectedKinds.includes("Fork") && isEderaForkPod(pod)),
+        );
+        if (related.length) sections.push(ederaPodTable(related));
+      }
+      printPre(sections.join("\n\n"));
     }
 
-    printPre(selectedKinds.map(ederaRuntimeTable).join("\n\n"));
+    if (selectedKinds.includes("Sandbox") && ederaSandboxReady) {
+      markDemoStepComplete("edera-sandbox-inspect");
+    }
+    if (selectedKinds.includes("Snapshot")) markDemoStepComplete("edera-snapshot-inspect");
+    if (selectedKinds.includes("Fork")) markDemoStepComplete("edera-fork-inspect");
     return true;
   };
 
@@ -5538,7 +5950,7 @@ Kernel isolation: enabled</span>`);
         return true;
       }
 
-      if (getJoined.includes("sandbox") && !getJoined.includes("sandboxes.agents")) {
+      if (getJoined.includes("sandbox") && !getJoined.includes("crd")) {
         if (!agentSandboxCreated) {
           printHtml(`<span style="color:#a8cfca;">No resources found.</span>`);
           return true;
@@ -6281,7 +6693,7 @@ Kernel isolation: enabled</span>`);
 
         const ready = pod.status === "Running";
         const containerName =
-          pod.name === "demo-pod"
+          pod.name === "agent-pod"
             ? "web"
             : pod.image.split("/").pop()?.split(":")[0] || pod.name;
 
@@ -7741,7 +8153,7 @@ Kernel isolation: enabled</span>`);
         apiVersion: "v1",
         kind: "Pod",
         metadata: {
-          name: "demo-pod",
+          name: "agent-pod",
           labels: {
             app: "demo",
           },
@@ -7788,16 +8200,18 @@ Kernel isolation: enabled</span>`);
     addEvent(
       "Normal",
       "Scheduled",
-      "pod/demo-pod",
-      "Assigned default/demo-pod to node-2",
+      "pod/agent-pod",
+      "Assigned default/agent-pod to node-2",
     );
 
     addEvent(
       "Normal",
       "Started",
-      "pod/demo-pod",
+      "pod/agent-pod",
       "Started container web",
     );
+
+    seedAgentZone();
 
     await new Promise((resolve) =>
       setTimeout(resolve, 500),
@@ -8529,6 +8943,18 @@ Kernel isolation: enabled</span>`);
               }
               if (manifestPath.endsWith("/agent-sandbox/template-and-warm-pool.yaml")) {
                 markDemoStepComplete("agent-sandbox-warm-pool");
+              }
+              if (manifestPath.endsWith("/agent-sandbox/edera-sandbox.yaml")) {
+                markDemoStepComplete("edera-sandbox-manifest");
+                if (completedDemoSteps.has("edera-fork-inspect")) {
+                  markDemoStepComplete("agent-sandbox-security-review");
+                }
+              }
+              if (manifestPath.endsWith("/agent-sandbox/edera-snapshot.yaml")) {
+                markDemoStepComplete("edera-snapshot-manifest");
+              }
+              if (manifestPath.endsWith("/agent-sandbox/edera-fork.yaml")) {
+                markDemoStepComplete("edera-fork-manifest");
               }
             } else {
               printHtml(

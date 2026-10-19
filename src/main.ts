@@ -1344,6 +1344,7 @@ async function initTerminalDemo() {
 
   const podGrid = document.querySelector<HTMLDivElement>("#pod-grid")!;
   const podCount = document.querySelector<HTMLSpanElement>("#pod-count")!;
+  const podsBodyForLimit = document.querySelector<HTMLDivElement>("#pods-body")!;
 
   const nodeGrid = document.querySelector<HTMLDivElement>("#node-grid")!;
   const nodeCount = document.querySelector<HTMLSpanElement>("#node-count")!;
@@ -1893,6 +1894,10 @@ vfio_pci`;
     }
   };
 
+  // Seed the system pods up front so the Active Pods panel and
+  // `kubectl get pods -A` always describe the same set of pods.
+  ensureCoreClusterPods();
+
   let nodes: LocalNode[] = [
     {
       name: "node-1",
@@ -2207,8 +2212,12 @@ vfio_pci`;
       podGrid.innerHTML = `
         <div class="empty-state">No pods running</div>
       `;
+      applyPodGridLimit();
       return;
     }
+
+    // Keep the reader's place in the list across re-renders.
+    const previousScrollTop = podGrid.scrollTop;
 
     podGrid.innerHTML = pods
       .map((pod) => {
@@ -2245,7 +2254,48 @@ vfio_pci`;
         `;
       })
       .join("");
+
+    applyPodGridLimit();
+    podGrid.scrollTop = previousScrollTop;
   };
+
+  // Show at most this many pod cards; the rest scroll inside the panel.
+  const MAX_VISIBLE_POD_CARDS = 3;
+
+  // Cap the pod list at MAX_VISIBLE_POD_CARDS cards, measured from the
+  // rendered cards so the limit follows the real card height and gap.
+  const applyPodGridLimit = () => {
+    const cards = Array.from(podGrid.children) as HTMLElement[];
+
+    if (cards.length <= MAX_VISIBLE_POD_CARDS) {
+      podGrid.style.maxHeight = "";
+      podGrid.style.overflowY = "";
+      podGrid.style.paddingTop = "";
+      podGrid.style.paddingRight = "";
+      return;
+    }
+
+    const first = cards[0];
+    const last = cards[MAX_VISIBLE_POD_CARDS - 1];
+    const visibleHeight = last.offsetTop + last.offsetHeight - first.offsetTop;
+
+    // The panel may be hidden (no layout yet). Leave the list uncapped and
+    // let the ResizeObserver below re-measure once it becomes visible.
+    if (visibleHeight <= 0) return;
+
+    // +2px so the hover lift on the top card isn't clipped.
+    podGrid.style.maxHeight = `${visibleHeight + 2}px`;
+    podGrid.style.overflowY = "auto";
+    podGrid.style.overscrollBehavior = "contain";
+    podGrid.style.paddingTop = "2px";
+    podGrid.style.paddingRight = "4px";
+  };
+
+  if (typeof ResizeObserver === "function") {
+    // Re-measure when the panel is shown again or its width changes (cards
+    // can wrap onto two lines on narrow layouts).
+    new ResizeObserver(() => applyPodGridLimit()).observe(podsBodyForLimit);
+  }
 
 const renderNodes = () => {
   nodeCount.innerText =

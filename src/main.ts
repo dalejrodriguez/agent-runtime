@@ -768,6 +768,86 @@ spec:
   sandboxTemplateRef:
     name: python-sandbox-edera-template`;
 
+// Edera-native Sandbox / Snapshot / Fork resources (runtime.edera.dev).
+// These are pre-applied when the lab starts (see EDERA_PREAPPLIED_PODS and the
+// runtime.edera.dev kubectl handlers); the files exist so users can read how
+// the resources were configured.
+const EDERA_SANDBOX_NAME = "sandbox-sample";
+const EDERA_SNAPSHOT_NAME = "sandbox-sample-snap";
+const EDERA_FORK_NAME = "sandbox-sample-snap-fork";
+// Snapshot.remote=Local pins the snapshot (and therefore the forks) to the
+// sandbox's node.
+const EDERA_SANDBOX_NODE = "node-2";
+
+const EDERA_SANDBOX_YAML = `apiVersion: runtime.edera.dev/v1alpha1
+kind: Sandbox
+metadata:
+  name: sandbox-sample
+spec:
+  podTemplate:
+    metadata:
+      labels:
+        app.kubernetes.io/name: sandbox-sample
+    spec:
+      containers:
+      - name: workload
+        image: registry.k8s.io/pause:3.10`;
+
+const EDERA_SNAPSHOT_YAML = `apiVersion: runtime.edera.dev/v1alpha1
+kind: Snapshot
+metadata:
+  name: sandbox-sample-snap
+  # Same namespace as the Sandbox; sandboxName is resolved there.
+  namespace: default
+spec:
+  sandboxName: sandbox-sample
+  # Local keeps the snapshot on the sandbox's node. Remote needs
+  # snapshotStorage.shared in the chart, which this install doesn't enable.
+  remote: Local`;
+
+const EDERA_FORK_YAML = `apiVersion: runtime.edera.dev/v1alpha1
+kind: Fork
+metadata:
+  name: sandbox-sample-snap-fork
+  namespace: default
+spec:
+  source:
+    sandbox: sandbox-sample
+  # The snapshot is local to the sandbox's node, so the forks run there too.
+  remote: Local
+  replicas: 2`;
+
+const EDERA_PREAPPLIED_PODS: LocalPod[] = [
+  {
+    name: EDERA_SANDBOX_NAME,
+    namespace: "default",
+    status: "Running",
+    age: "10m",
+    image: "registry.k8s.io/pause:3.10",
+    ip: "10.244.0.51",
+    node: EDERA_SANDBOX_NODE,
+    labels: {
+      "app.kubernetes.io/name": EDERA_SANDBOX_NAME,
+      "runtime.edera.dev/sandbox": EDERA_SANDBOX_NAME,
+    },
+    runtimeClassName: "edera",
+  },
+  ...[0, 1].map((index) => ({
+    name: `${EDERA_FORK_NAME}-${index}`,
+    namespace: "default",
+    status: "Running",
+    age: "9m",
+    image: "registry.k8s.io/pause:3.10",
+    ip: `10.244.0.${52 + index}`,
+    node: EDERA_SANDBOX_NODE,
+    labels: {
+      "app.kubernetes.io/name": EDERA_SANDBOX_NAME,
+      "runtime.edera.dev/fork": EDERA_FORK_NAME,
+    },
+    runtimeClassName: "edera",
+  })),
+];
+
 const AGENT_SANDBOX_ROUTER_COMMAND = `kubectl apply -f https://raw.githubusercontent.com/kubernetes-sigs/agent-sandbox/${AGENT_SANDBOX_VERSION}/clients/python/agentic-sandbox-client/sandbox-router/sandbox_router.yaml`;
 
 const OCAP_GITHUB_CAPABILITY = `name = "github"
@@ -1357,6 +1437,9 @@ async function initTerminalDemo() {
     "/edera/nginx-deployment.yaml": NGINX_DEPLOYMENT_YAML_CONTENT,
     "/agent-sandbox/sandbox.yaml": AGENT_SANDBOX_MANIFEST_YAML,
     "/agent-sandbox/template-and-warm-pool.yaml": AGENT_SANDBOX_TEMPLATE_AND_POOL_YAML,
+    "/agent-sandbox/edera-sandbox.yaml": EDERA_SANDBOX_YAML,
+    "/agent-sandbox/edera-snapshot.yaml": EDERA_SNAPSHOT_YAML,
+    "/agent-sandbox/edera-fork.yaml": EDERA_FORK_YAML,
 
     "/etc/falco/config.d/falco-edera-config.yaml": FALCO_EDERA_CONFIG_YAML,
     "/etc/falco/rules.d/falco-edera-rules.yaml": FALCO_EDERA_RULES_YAML,
@@ -1745,6 +1828,8 @@ vfio_pci`;
       node: "node-2",
       labels: { app: "demo" },
     },
+    // Edera Sandbox + Fork pods are already running when the lab starts.
+    ...EDERA_PREAPPLIED_PODS.map((pod) => ({ ...pod, labels: { ...pod.labels } })),
   ];
 
   const ensureCoreClusterPods = () => {
@@ -4861,6 +4946,232 @@ Kernel isolation: enabled</span>`);
     return namespaceName;
   };
 
+  // -----------------------------------------------------------------------
+  // Edera-native Sandbox / Snapshot / Fork (runtime.edera.dev/v1alpha1).
+  // All three are pre-applied when the lab starts, so the simulator treats
+  // them as static, already-reconciled resources: `apply` reports unchanged,
+  // and `get` / `describe` render them.
+  // -----------------------------------------------------------------------
+  type EderaRuntimeKind = "Sandbox" | "Snapshot" | "Fork";
+
+  const EDERA_RUNTIME_MANIFESTS: Record<
+    EderaRuntimeKind,
+    { file: string; name: string; plural: string; yaml: string }
+  > = {
+    Sandbox: {
+      file: "agent-sandbox/edera-sandbox.yaml",
+      name: EDERA_SANDBOX_NAME,
+      plural: "sandboxes",
+      yaml: EDERA_SANDBOX_YAML,
+    },
+    Snapshot: {
+      file: "agent-sandbox/edera-snapshot.yaml",
+      name: EDERA_SNAPSHOT_NAME,
+      plural: "snapshots",
+      yaml: EDERA_SNAPSHOT_YAML,
+    },
+    Fork: {
+      file: "agent-sandbox/edera-fork.yaml",
+      name: EDERA_FORK_NAME,
+      plural: "forks",
+      yaml: EDERA_FORK_YAML,
+    },
+  };
+
+  // Map a kubectl resource token to an Edera runtime kind. A bare
+  // `sandbox` is ambiguous once the upstream Agent Sandbox CRD
+  // (agents.x-k8s.io) is installed; only claim it for runtime.edera.dev when
+  // that CRD isn't present yet, or when the Edera sandbox is named explicitly.
+  const resolveEderaRuntimeKind = (
+    token: string,
+    requestedNames: string[],
+  ): EderaRuntimeKind | null => {
+    const lower = token.toLowerCase();
+    const [base, ...group] = lower.split(".");
+    const groupName = group.join(".");
+    if (groupName && groupName !== "runtime.edera.dev") return null;
+
+    if (["snapshot", "snapshots"].includes(base)) return "Snapshot";
+    if (["fork", "forks"].includes(base)) return "Fork";
+    if (["sandbox", "sandboxes"].includes(base)) {
+      if (groupName) return "Sandbox";
+      if (!agentSandboxInstalled) return "Sandbox";
+      if (requestedNames.includes(EDERA_SANDBOX_NAME)) return "Sandbox";
+    }
+    return null;
+  };
+
+  const ederaForkPods = () =>
+    pods.filter(
+      (pod) => pod.labels["runtime.edera.dev/fork"] === EDERA_FORK_NAME,
+    );
+
+  const ederaRuntimeTable = (kind: EderaRuntimeKind) => {
+    const name = { text: EDERA_RUNTIME_MANIFESTS[kind].name, color: "#b8ff3c" };
+    if (kind === "Sandbox") {
+      const pod = pods.find((item) => item.name === EDERA_SANDBOX_NAME);
+      return formatTerminalTable(
+        ["NAME", "READY", "NODE", "AGE"],
+        [[name, pod?.status === "Running" ? "True" : "False", pod?.node || "<none>", "10m"]],
+      );
+    }
+    if (kind === "Snapshot") {
+      return formatTerminalTable(
+        ["NAME", "SANDBOX", "REMOTE", "READY", "AGE"],
+        [[name, EDERA_SANDBOX_NAME, "Local", "True", "9m"]],
+      );
+    }
+    const forks = ederaForkPods();
+    const ready = forks.filter((pod) => pod.status === "Running").length;
+    return formatTerminalTable(
+      ["NAME", "SOURCE", "REMOTE", "READY", "AGE"],
+      [[name, `sandbox/${EDERA_SANDBOX_NAME}`, "Local", `${ready}/2`, "9m"]],
+    );
+  };
+
+  const ederaRuntimeDescribe = (kind: EderaRuntimeKind) => {
+    const { name } = EDERA_RUNTIME_MANIFESTS[kind];
+    const lines = [
+      `Name:         ${name}`,
+      `Namespace:    default`,
+      `API Version:  runtime.edera.dev/v1alpha1`,
+      `Kind:         ${kind}`,
+    ];
+    if (kind === "Sandbox") {
+      lines.push(
+        `Spec:`,
+        `  Pod Template:`,
+        `    Containers:`,
+        `      workload: registry.k8s.io/pause:3.10`,
+        `Status:`,
+        `  Node:   ${EDERA_SANDBOX_NODE}`,
+        `  Ready:  True`,
+      );
+    } else if (kind === "Snapshot") {
+      lines.push(
+        `Spec:`,
+        `  Sandbox Name:  ${EDERA_SANDBOX_NAME}`,
+        `  Remote:        Local`,
+        `Status:`,
+        `  Node:   ${EDERA_SANDBOX_NODE}  (Local snapshots stay on the sandbox's node)`,
+        `  Ready:  True`,
+      );
+    } else {
+      const forks = ederaForkPods();
+      lines.push(
+        `Spec:`,
+        `  Source:`,
+        `    Sandbox:  ${EDERA_SANDBOX_NAME}`,
+        `  Remote:    Local`,
+        `  Replicas:  2`,
+        `Status:`,
+        `  Ready Replicas:  ${forks.filter((pod) => pod.status === "Running").length}`,
+        `  Forks:`,
+        ...forks.map((pod) => `    ${pod.name}  ${pod.status}  ${pod.node}`),
+      );
+    }
+    lines.push(`Events:       <none>`);
+    return lines.join("\n");
+  };
+
+  const handleEderaRuntimeResources = (tokens: string[]): boolean => {
+    const verb = tokens[1];
+
+    if (verb === "apply" && tokens[2] === "-f") {
+      const requested = (tokens[3] || "").replace(/^['"]|['"]$/g, "");
+      const entry = (Object.keys(EDERA_RUNTIME_MANIFESTS) as EderaRuntimeKind[])
+        .map((kind) => ({ kind, ...EDERA_RUNTIME_MANIFESTS[kind] }))
+        .find((item) => requested.endsWith(item.file));
+      if (!entry) return false;
+      printHtml(
+        `<span style="color:#a8cfca;">${entry.plural}.runtime.edera.dev/${escapeHtml(
+          entry.name,
+        )} unchanged</span>`,
+      );
+      return true;
+    }
+
+    if (verb !== "get" && verb !== "describe") return false;
+
+    // Split args into the resource token and positional names, skipping
+    // flag values such as `-n default` or `-o yaml`.
+    const args = tokens.slice(2);
+    const resourceToken = args[0] || "";
+    const names: string[] = [];
+    let output = "";
+    let namespace = "default";
+    for (let i = 1; i < args.length; i++) {
+      const token = args[i];
+      if (token === "-n" || token === "--namespace") {
+        namespace = args[++i] || namespace;
+      } else if (token === "-o" || token === "--output") {
+        output = args[++i] || "";
+      } else if (token.startsWith("-o")) {
+        output = token.replace(/^-o=?/, "");
+      } else if (token.startsWith("--output=")) {
+        output = token.split("=")[1] || "";
+      } else if (!token.startsWith("-")) {
+        names.push(token);
+      }
+    }
+
+    // Support `kubectl get sandbox,snapshot,fork` as long as every listed
+    // resource is one of ours; mixed lists fall through to other handlers.
+    const resourceParts = resourceToken.includes("/")
+      ? [resourceToken.split("/")[0]]
+      : resourceToken.split(",").filter(Boolean);
+    if (resourceToken.includes("/")) names.push(resourceToken.split("/")[1]);
+    if (resourceParts.length === 0) return false;
+
+    const kinds = resourceParts.map((part) => resolveEderaRuntimeKind(part, names));
+    if (kinds.some((kind) => kind === null)) return false;
+    const resolvedKinds = kinds as EderaRuntimeKind[];
+    const allNamespaces = tokens.includes("-A") || tokens.includes("--all-namespaces");
+
+    if (!allNamespaces && namespace !== "default") {
+      printHtml(
+        `<span style="color:#a8cfca;">No resources found in ${escapeHtml(namespace)} namespace.</span>`,
+      );
+      return true;
+    }
+
+    for (const name of names) {
+      const known = resolvedKinds.some(
+        (kind) => EDERA_RUNTIME_MANIFESTS[kind].name === name,
+      );
+      if (!known) {
+        const plural = EDERA_RUNTIME_MANIFESTS[resolvedKinds[0]].plural;
+        printHtml(
+          `<span style="color:#ff7373;">Error from server (NotFound): ${plural}.runtime.edera.dev "${escapeHtml(
+            name,
+          )}" not found</span>`,
+        );
+        return true;
+      }
+    }
+
+    const selectedKinds = names.length
+      ? resolvedKinds.filter((kind) => names.includes(EDERA_RUNTIME_MANIFESTS[kind].name))
+      : resolvedKinds;
+
+    if (verb === "describe") {
+      printPre(escapeHtml(selectedKinds.map(ederaRuntimeDescribe).join("\n\n\n")));
+      return true;
+    }
+
+    if (output === "yaml") {
+      printPre(
+        escapeHtml(
+          selectedKinds.map((kind) => EDERA_RUNTIME_MANIFESTS[kind].yaml).join("\n---\n"),
+        ),
+      );
+      return true;
+    }
+
+    printPre(selectedKinds.map(ederaRuntimeTable).join("\n\n"));
+    return true;
+  };
+
   const handleKubectlCommand = async (
     rawCmd: string,
     tokens: string[],
@@ -4874,6 +5185,10 @@ Kernel isolation: enabled</span>`);
     // These are simulator-only resources layered on the existing Kubernetes
     // lab; the original pod/deployment/storage/Edera commands remain intact.
     // ---------------------------------------------------------------------
+    if (handleEderaRuntimeResources(tokens)) {
+      return true;
+    }
+
     if (tokens[1] === "apply" && tokens[2] === "-f") {
       const requestedPath = tokens[3] || "";
       const normalizedRequestedPath = requestedPath.replace(/^['"]|['"]$/g, "");

@@ -2419,21 +2419,31 @@ const renderNodes = () => {
       .join("");
   };
   const renderCapability = () => {
-    // The capability exists once a ready zone has published it.
+    // Capabilities only exist while a ready zone publishes them; destroying
+    // the zone removes them.
     const published = protectZones.some(
       (zone) =>
         zone.state === "ready" &&
         zone.ocapPublished?.includes(OCAP_GITHUB_NAME),
     );
-    capabilityCount.innerText = published ? "1 Capability" : "0 Capabilities";
 
-    const action = !published
-      ? {
-          label: "NOT PUBLISHED",
-          color: "#4b6864",
-          detail: "Publish it with protect zone launch --ocap-publish github.toml.",
-        }
-      : lastOcapAction === "allowed"
+    if (!published) {
+      // A re-published capability starts fresh rather than showing the last
+      // request made through a zone that no longer exists.
+      lastOcapAction = "idle";
+      capabilityCount.innerText = "0 Capabilities";
+      capabilityGrid.innerHTML = `
+        <div class="empty-state">
+          No capabilities have been published in an Edera zone.
+        </div>
+      `;
+      return;
+    }
+
+    capabilityCount.innerText = "1 Capability";
+
+    const action =
+      lastOcapAction === "allowed"
         ? {
             label: "ALLOWED",
             color: "#2f7d14",

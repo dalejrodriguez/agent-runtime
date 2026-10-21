@@ -31,6 +31,8 @@ interface LocalPod {
   nodeSelector?: Record<string, string>;
   runtimeClassName?: string;
   ownerDeployment?: string;
+  // Set on pods created by `protect workload launch`; removed with the workload.
+  ownerProtectWorkload?: string;
 }
 
 interface LocalDeployment {
@@ -867,7 +869,10 @@ const OCAP_ZONE_NAME = "kubecon-salt-lake";
 const OCAP_WORKLOAD_NAME = "agent";
 const OCAP_WORKLOAD_IMAGE = "docker.io/alpine/git:latest";
 
-const AGENT_SANDBOX_DEMO_STEPS: DemoStep[] = [
+// The full walkthrough, including the Sandbox / Snapshot / Fork steps. Their
+// commands and manifests still work in the terminal; the guide only shows the
+// object capability steps (see AGENT_SANDBOX_DEMO_STEPS below).
+const ALL_AGENT_SANDBOX_DEMO_STEPS: DemoStep[] = [
   {
     id: "edera-ocap-daemonset",
     title: "Verify the Edera Object Capabilities proxy",
@@ -1097,6 +1102,14 @@ const AGENT_SANDBOX_DEMO_STEPS: DemoStep[] = [
     optional: true,
   },
 ];
+
+// The guide ends once the Edera Sandbox CRDs are verified, which is where the
+// completion pop-up appears. This keeps the demo focused on object capabilities.
+const LAST_GUIDED_STEP_ID = "edera-crds";
+const AGENT_SANDBOX_DEMO_STEPS: DemoStep[] = ALL_AGENT_SANDBOX_DEMO_STEPS.slice(
+  0,
+  ALL_AGENT_SANDBOX_DEMO_STEPS.findIndex((step) => step.id === LAST_GUIDED_STEP_ID) + 1,
+);
 
 async function initTerminalDemo() {
 
@@ -1837,22 +1850,12 @@ vfio_pci`;
   let jobs: LocalJob[] = [];
 
   let pods: LocalPod[] = [
-    {
-      name: "agent-pod",
-      namespace: "default",
-      status: "Running",
-      age: "2m",
-      image: "web-server:1.0",
-      ip: "10.244.0.5",
-      node: "node-2",
-      labels: { app: "demo" },
-    },
   ];
 
   const ensureCoreClusterPods = () => {
     const corePods: LocalPod[] = [
       {
-        name: "edera-runtime-controller-manager-646ddcbfbb-p656l",
+        name: "edera-runtime-controller-p656l",
         namespace: "edera-runtime",
         status: "Running",
         age: "10m",
@@ -3036,6 +3039,7 @@ const renderNodes = () => {
         `Workload ${workload.name} removed with zone ${zone.name}`,
       );
     }
+    removePodsForProtectWorkloads(attached.map((workload) => workload.uuid));
 
     protectWorkloads = protectWorkloads.filter(
       (workload) => workload.zone !== zone.uuid,
@@ -3157,6 +3161,59 @@ const renderNodes = () => {
     updateDashboard();
   };
 
+  // Workloads launched through the Protect CLI show up as pods in the
+  // default namespace, so `kubectl get pods` reflects what's running.
+  const nextWorkloadPodIp = () => {
+    const used = new Set(pods.map((pod) => pod.ip));
+    for (let i = 30; i < 250; i++) {
+      const ip = `10.244.0.${i}`;
+      if (!used.has(ip)) return ip;
+    }
+    return "10.244.0.250";
+  };
+
+  const createPodForProtectWorkload = (workload: ProtectWorkload) => {
+    if (pods.some((pod) => pod.namespace === "default" && pod.name === workload.name)) {
+      return;
+    }
+    pods.push({
+      name: workload.name,
+      namespace: "default",
+      status: "Running",
+      age: "0s",
+      image: workload.image,
+      ip: nextWorkloadPodIp(),
+      node: "node-2",
+      labels: { app: workload.name },
+      runtimeClassName: "edera",
+      ownerProtectWorkload: workload.uuid,
+    });
+    workload.sourcePodName = workload.name;
+    addEvent(
+      "Normal",
+      "Scheduled",
+      `pod/${workload.name}`,
+      `Assigned default/${workload.name} to node-2`,
+    );
+  };
+
+  const removePodsForProtectWorkloads = (workloadIds: string[]) => {
+    const ids = new Set(workloadIds);
+    const removed = pods.filter(
+      (pod) => pod.ownerProtectWorkload && ids.has(pod.ownerProtectWorkload),
+    );
+    if (removed.length === 0) return;
+    pods = pods.filter((pod) => !removed.includes(pod));
+    for (const pod of removed) {
+      addEvent(
+        "Normal",
+        "Killing",
+        `pod/${pod.name}`,
+        `Deleted pod default/${pod.name} with its Edera workload`,
+      );
+    }
+  };
+
   const launchProtectWorkload = (
     zoneIdentifier: string,
     name: string,
@@ -3263,6 +3320,8 @@ const renderNodes = () => {
       `workload/${name}`,
       `Started ${image} in Edera zone ${zone.name}`,
     );
+
+    createPodForProtectWorkload(workload);
 
     for (const capabilityName of ocapConsumed) {
       addEvent(
@@ -3452,6 +3511,7 @@ const renderNodes = () => {
     protectWorkloads = protectWorkloads.filter(
       (item) => item.uuid !== workload.uuid,
     );
+    removePodsForProtectWorkloads([workload.uuid]);
 
     printHtml(
       `<span style="color:#b8ff3c;">Workload "${escapeHtml(
@@ -6240,7 +6300,7 @@ Kernel isolation: enabled</span>`);
           formatTerminalTable(
             ["NAME", "READY", "STATUS", "RESTARTS", "AGE"],
             [
-              [{ text: "edera-runtime-controller-manager-646ddcbfbb-p656l", color: "#b8ff3c" }, "1/1", "Running", "0", "10m"],
+              [{ text: "edera-runtime-controller-p656l", color: "#b8ff3c" }, "1/1", "Running", "0", "10m"],
               [{ text: "edera-runtime-ocap-proxy-gn8g7", color: "#b8ff3c" }, "3/3", "Running", "0", "3m"],
               [{ text: "edera-runtime-ocap-proxy-gtvf9", color: "#b8ff3c" }, "3/3", "Running", "0", "3m"],
             ],
@@ -7082,9 +7142,7 @@ Kernel isolation: enabled</span>`);
 
         const ready = pod.status === "Running";
         const containerName =
-          pod.name === "agent-pod"
-            ? "web"
-            : pod.image.split("/").pop()?.split(":")[0] || pod.name;
+          pod.image.split("/").pop()?.split(":")[0] || pod.name;
 
         const nodeName =
           pod.node && pod.node !== "<none>" ? pod.node : "<none>";
@@ -8540,24 +8598,6 @@ Kernel isolation: enabled</span>`);
     await cluster.apply([
       {
         apiVersion: "v1",
-        kind: "Pod",
-        metadata: {
-          name: "agent-pod",
-          labels: {
-            app: "demo",
-          },
-        },
-        spec: {
-          containers: [
-            {
-              name: "web",
-              image: "web-server:1.0",
-            },
-          ],
-        },
-      },
-      {
-        apiVersion: "v1",
         kind: "Service",
         metadata: {
           name: "demo-service",
@@ -8584,20 +8624,6 @@ Kernel isolation: enabled</span>`);
       "ClusterInitialized",
       "cluster",
       "Webernetes browser cluster online",
-    );
-
-    addEvent(
-      "Normal",
-      "Scheduled",
-      "pod/agent-pod",
-      "Assigned default/agent-pod to node-2",
-    );
-
-    addEvent(
-      "Normal",
-      "Started",
-      "pod/agent-pod",
-      "Started container web",
     );
 
     await new Promise((resolve) =>

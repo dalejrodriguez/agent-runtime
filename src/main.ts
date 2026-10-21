@@ -863,7 +863,7 @@ env = { GIT_TERMINAL_PROMPT = "0" }`;
 // published when the zone is created and consumed by the agent workload.
 const OCAP_GITHUB_MANIFEST_PATH = "/github.toml";
 const OCAP_GITHUB_NAME = "github";
-const OCAP_ZONE_NAME = "my-test-zone";
+const OCAP_ZONE_NAME = "kubecon-salt-lake";
 const OCAP_WORKLOAD_NAME = "agent";
 const OCAP_WORKLOAD_IMAGE = "docker.io/alpine/git:latest";
 

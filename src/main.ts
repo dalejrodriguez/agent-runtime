@@ -1318,7 +1318,7 @@ async function initTerminalDemo() {
           <div style="width:64px;height:64px;margin:0 auto 20px;display:grid;place-items:center;border-radius:50%;background:#b8ff3c;color:#081716;font-size:32px;font-weight:800;">✓</div>
           <div style="margin-bottom:10px;color:#00e5d4;font-size:12px;font-weight:800;letter-spacing:.16em;">LAB COMPLETE</div>
           <h2 id="completion-title" style="margin:0 0 14px;color:#f8fffd;font-size:30px;">Thank you for completing the lab!</h2>
-          <p style="margin:0 0 28px;color:#a8cfca;line-height:1.6;">You've completed the Agent Sandbox + Edera runtime walkthrough. Ready to try Edera for yourself?</p>
+          <p style="margin:0 0 28px;color:#a8cfca;line-height:1.6;">You've completed the Edera Agent Sandbox walkthrough. Ready to try Edera for yourself?</p>
           <div class="completion-actions">
             <button id="restart-demo-btn" type="button" class="completion-restart-btn">Start a new session</button>
             <a href="https://on.edera.dev" target="_blank" rel="noopener noreferrer" class="completion-license-link">Sign up for a free Edera license →</a>

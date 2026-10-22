@@ -1134,7 +1134,7 @@ async function initTerminalDemo() {
         <h2 id="hero-title">AGENT<br />RUNTIME</h2>
         <p>
           Edera allows you to give an AI agent limited capabilities such as scoped
-          permissions to external services, within our secure agent sandbox.
+          permissions to external services, within our secure container and agent sandbox.
         </p>
         <button id="hero-run-btn" class="hero-cta" type="button">Jump to Terminal</button>
       </section>

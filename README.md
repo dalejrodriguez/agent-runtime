@@ -7,7 +7,8 @@ https://ndouglas-edera.github.io/agent-runtime/
 
 ## Demo Workflow
 Same readme fetcher in ```Rust```, ```Python``` and ```TypeScript```. <br/>
-The container idles until you exec `/readme-fetch get <repo>` into it, then it prints the README for `edera-dev/<repo>`
+The container idles until you exec `/readme-fetch get <repo>` into it <br/>
+Then it prints the **README** file for the specified `edera-dev/<repo>` repo.
 
 ### Token
 Needs a GitHub token with read access to the ```edera-dev``` repos, mounted at `/run/secrets/token`

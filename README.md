@@ -59,3 +59,21 @@ Dialing the capability via protect client
 ```
 sudo protect object-capability dial dev.example/readme protect
 ```
+
+Something like this..
+```
+…/edera-runtime  found-it/capability $!? +6  kind-edera-runtime-e2e 
+➜ k apply -f examples/capability.yaml
+capability.runtime.edera.dev/github created
+capability.runtime.edera.dev/linear-search created
+capability.runtime.edera.dev/kubernetes-prod created
+capability.runtime.edera.dev/kubernetes-dev created
+
+…/edera-runtime  found-it/capability $!? +6  kind-edera-runtime-e2e 
+➜ k get capability
+NAME              PHASE   ACCEPTED   READY   POD   AGE
+github                                             5s
+kubernetes-dev                                     5s
+kubernetes-prod                                    5s
+linear-search                                      5s
+```

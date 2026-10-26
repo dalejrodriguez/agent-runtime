@@ -77,3 +77,44 @@ kubernetes-dev                                     5s
 kubernetes-prod                                    5s
 linear-search                                      5s
 ```
+
+And then a template would look like this
+```
+apiVersion: runtime.edera.dev/v1alpha1
+kind: SandboxTemplate
+metadata:
+  name: claude-tmpl
+spec:
+  capabilities:
+  - kubernetes-dev
+  - github
+  - linear-search
+  podTemplate:
+    spec:
+      containers:
+        - name: workload
+          image: registry.k8s.io/pause:latest
+```
+Where it defines a set of capabilities that is a subset of the capabilities that exist in the cluster. <br/>
+Then a session would be created like this (k8s object)
+
+```
+apiVersion: runtime.edera.dev/v1alpha1
+kind: SandboxSession
+metadata:
+  name: claude-session-0
+spec:
+  capabilities:
+  - kubernetes-dev
+  - github
+  templateRef:
+    name: claude-tmpl
+```
+Which ultimately creates a zone and workload that consume those two capabilities <br/>
+For the SDK, we think it'd look something like this
+```
+with SandboxSession(from='claude-tmpl', capabilities=['kubernetes-dev', 'github']) as s:
+    s.sandbox.run("agent.py --repo my-repo")
+```
+
+And ultimately that with ```SandboxSession ...``` gets translated into the SandboxSession kubernetes object above

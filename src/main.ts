@@ -140,6 +140,16 @@ interface ProtectWorkload {
   // Object capabilities this workload consumes / publishes.
   ocapConsumed?: string[];
   ocapPublished?: string[];
+  // Command run when a published capability is dialed (NAME=COMMAND ARGS).
+  ocapPublishCommands?: Record<string, string[]>;
+  // Host files mounted into the workload (--mounts src=…:dst=…:ro=…).
+  mounts?: WorkloadMount[];
+}
+
+interface WorkloadMount {
+  source: string;
+  destination: string;
+  readOnly: boolean;
 }
 
 interface DemoStep {
@@ -869,6 +879,31 @@ const OCAP_ZONE_NAME = "kubecon-salt-lake";
 const OCAP_WORKLOAD_NAME = "agent";
 const OCAP_WORKLOAD_IMAGE = "docker.io/alpine/git:latest";
 
+// A workload can publish a capability too (README "Demo Workflow"). The
+// readme-fetch provider idles in its own zone holding a GitHub token, and
+// publishes one command: `/readme-fetch get <repo>`. Dialing the capability
+// runs that command with the caller's argument; the token never leaves the
+// provider. The same fetcher exists in Rust, Python and TypeScript.
+const README_ZONE_NAME = "cap-provider";
+const README_WORKLOAD_NAME = "readme";
+const README_CAPABILITY = "dev.example/readme";
+const README_CAPABILITY_COMMAND = "/readme-fetch get";
+const README_TOKEN_HOST_PATH = "/tmp/token";
+const README_TOKEN_MOUNT_PATH = "/run/secrets/token";
+const README_IMAGE_PREFIX = "ttl.sh/celery/readme-fetch-";
+const README_LANGUAGES = ["rust", "python", "typescript"] as const;
+type ReadmeLanguage = (typeof README_LANGUAGES)[number];
+const README_WORKLOAD_IMAGE = `${README_IMAGE_PREFIX}rust:1h`;
+const README_DIAL_REPO = "protect";
+const README_WORKLOAD_LAUNCH_COMMAND =
+  `protect workload launch -n ${README_WORKLOAD_NAME} -z ${README_ZONE_NAME} ` +
+  `--mounts src=${README_TOKEN_HOST_PATH}:dst=${README_TOKEN_MOUNT_PATH}:ro=true ` +
+  `--ocap-publish '${README_CAPABILITY}=${README_CAPABILITY_COMMAND}' ` +
+  README_WORKLOAD_IMAGE;
+// Host files that exist outside the read-only home directory. The lab stages
+// a GitHub token at /tmp/token for the readme provider to mount.
+const HOST_FILES = new Set<string>([README_TOKEN_HOST_PATH]);
+
 // The full walkthrough, including the Sandbox / Snapshot / Fork steps. Their
 // commands and manifests still work in the terminal; the guide only shows the
 // object capability steps (see AGENT_SANDBOX_DEMO_STEPS below).
@@ -977,6 +1012,41 @@ const ALL_AGENT_SANDBOX_DEMO_STEPS: DemoStep[] = [
     description:
       "List the zones one final time. The zone should now be shown as destroyed, demonstrating the complete Edera zone lifecycle.",
     command: "protect zone list",
+  },
+  {
+    id: "readme-zone-launch",
+    title: "Launch a capability provider zone",
+    description:
+      `So far the zone published a capability from a manifest. A workload can publish one too. Start a fresh zone, <code class='guide-code'>${README_ZONE_NAME}</code>, for the provider to run in.`,
+    command: `protect zone launch -n ${README_ZONE_NAME}`,
+  },
+  {
+    id: "readme-workload-launch",
+    title: "Launch the README fetcher as a provider",
+    description:
+      `The <code class='guide-code'>readme-fetch</code> image (Rust here; <code class='guide-code'>-python</code> and <code class='guide-code'>-typescript</code> builds behave the same) idles until called. A GitHub token staged at <code class='guide-code'>${README_TOKEN_HOST_PATH}</code> is mounted read-only into the provider at <code class='guide-code'>${README_TOKEN_MOUNT_PATH}</code>, and <code class='guide-code'>--ocap-publish</code> exposes exactly one command as <code class='guide-code'>${README_CAPABILITY}</code>.`,
+    command: README_WORKLOAD_LAUNCH_COMMAND,
+  },
+  {
+    id: "readme-dial",
+    title: "Dial the capability",
+    description:
+      `Call <code class='guide-code'>${README_CAPABILITY}</code> with a repository name. The provider runs <code class='guide-code'>${README_CAPABILITY_COMMAND} ${README_DIAL_REPO}</code> and prints the README of <code class='guide-code'>edera-dev/${README_DIAL_REPO}</code>. The caller gets the result, never the token.`,
+    command: `protect object-capability dial ${README_CAPABILITY} ${README_DIAL_REPO}`,
+  },
+  {
+    id: "readme-dial-invalid",
+    title: "Ask for something the capability doesn't do",
+    description:
+      `The caller only supplies the argument; the command is fixed by the publisher. The fetcher accepts an alphanumeric <code class='guide-code'>edera-dev</code> repository name and nothing else, so a path-like argument is refused.`,
+    command: `protect object-capability dial ${README_CAPABILITY} ../../etc/passwd`,
+  },
+  {
+    id: "readme-zone-destroy",
+    title: "Destroy the provider zone",
+    description:
+      `Tear down <code class='guide-code'>${README_ZONE_NAME}</code>. The provider workload, its token mount and the <code class='guide-code'>${README_CAPABILITY}</code> capability go with it.`,
+    command: `protect zone destroy ${README_ZONE_NAME} --wait`,
   },
   {
     id: "edera-crds",
@@ -1824,6 +1894,9 @@ vfio_pci`;
     | "credential-blocked";
 
   let lastOcapAction: OcapAction = "idle";
+  // Last result of dialing the workload-published readme capability.
+  let lastReadmeAction: "idle" | "allowed" | "denied" | "error" = "idle";
+  let lastReadmeRepo = "";
 
   // A pod's runtimeClassName is only "effective" once that RuntimeClass
   // actually exists in the cluster. Until it's created the pod can't be
@@ -2430,10 +2503,24 @@ const renderNodes = () => {
         zone.ocapPublished?.includes(OCAP_GITHUB_NAME),
     );
 
+    // Workload-published readme capability (README "Demo Workflow").
+    const readmeProvider = protectWorkloads.find(
+      (workload) =>
+        workload.state === "running" &&
+        workload.ocapPublishCommands?.[README_CAPABILITY],
+    );
+    if (!readmeProvider) {
+      lastReadmeAction = "idle";
+      lastReadmeRepo = "";
+    }
+
     if (!publishingZone) {
       // A re-published capability starts fresh rather than showing the last
       // request made through a zone that no longer exists.
       lastOcapAction = "idle";
+    }
+
+    if (!publishingZone && !readmeProvider) {
       capabilityCount.innerText = "0 Capabilities";
       capabilityGrid.innerHTML = `
         <div class="empty-state">
@@ -2443,7 +2530,15 @@ const renderNodes = () => {
       return;
     }
 
-    capabilityCount.innerText = "1 Capability";
+    const capabilityTotal = (publishingZone ? 1 : 0) + (readmeProvider ? 1 : 0);
+    capabilityCount.innerText =
+      capabilityTotal === 1 ? "1 Capability" : `${capabilityTotal} Capabilities`;
+
+    const readmeCard = readmeProvider ? renderReadmeCapabilityCard(readmeProvider) : "";
+    if (!publishingZone) {
+      capabilityGrid.innerHTML = readmeCard;
+      return;
+    }
 
     const action =
       lastOcapAction === "allowed"
@@ -2509,6 +2604,75 @@ const renderNodes = () => {
         <div style="font-size:11px;color:#4b6864;line-height:1.25;">
           <strong style="color:#315b55;">🔐 Bounded Zone:</strong>
           <code style="color:#244e49;overflow-wrap:anywhere;">${escapeHtml(publishingZone.name)}</code>
+        </div>
+      </div>
+    ` + readmeCard;
+  };
+
+  const renderReadmeCapabilityCard = (provider: ProtectWorkload): string => {
+    const zone = protectZones.find((item) => item.uuid === provider.zone);
+    const command = provider.ocapPublishCommands?.[README_CAPABILITY]?.join(" ") || "";
+    const tokenMount = provider.mounts?.find(
+      (mount) => mount.destination === README_TOKEN_MOUNT_PATH,
+    );
+    const action =
+      lastReadmeAction === "allowed"
+        ? { label: "ALLOWED", color: "#2f7d14" }
+        : lastReadmeAction === "denied"
+          ? { label: "DENIED", color: "#b42318" }
+          : lastReadmeAction === "error"
+            ? { label: "FAILED", color: "#b54708" }
+            : { label: "READY", color: "#276b63" };
+
+    return `
+      <div
+        class="capability-card"
+        style="
+          display:grid;
+          grid-template-columns:minmax(180px,1.05fr) minmax(260px,1.6fr) minmax(220px,1fr);
+          gap:14px;
+          align-items:center;
+          min-height:72px;
+          padding:10px 14px;
+          margin-top:10px;
+          border:1px solid rgba(13,63,57,.12);
+          border-radius:14px;
+          background:#f5fbf9;
+          color:#163c38;
+          box-sizing:border-box;
+        "
+      >
+        <div>
+          <div style="display:flex;align-items:center;gap:10px;margin-bottom:3px;">
+            <div style="font-size:16px;font-weight:800;color:#102f2c;">${escapeHtml(README_CAPABILITY)}</div>
+            <span style="font-size:10px;font-weight:800;letter-spacing:.08em;color:${action.color};">${action.label}</span>
+          </div>
+          <div style="font-size:11px;color:#4b6864;line-height:1.3;">
+            Published by workload <strong style="color:#173f3a;">${escapeHtml(provider.name)}</strong>
+            (${readmeLanguageForImage(provider.image)})
+          </div>
+        </div>
+
+        <div class="capability-rules" style="display:grid;gap:5px;font-size:11px;min-width:0;">
+          <div style="display:flex;gap:8px;align-items:center;min-width:0;">
+            <span style="min-width:46px;padding:3px 6px;border-radius:5px;background:rgba(118,190,28,.14);color:#3e7f0e;font-weight:800;text-align:center;">RUN</span>
+            <code class="capability-target" style="color:#244e49;overflow-wrap:anywhere;">${escapeHtml(command)} &lt;repo&gt;</code>
+          </div>
+          ${
+            lastReadmeRepo
+              ? `<div style="color:#4b6864;">Last dial: <code style="color:#244e49;overflow-wrap:anywhere;">${escapeHtml(lastReadmeRepo)}</code></div>`
+              : ""
+          }
+          <div style="color:#b42318;font-weight:700;">✕ Callers choose the argument, not the command</div>
+        </div>
+
+        <div style="font-size:11px;color:#4b6864;line-height:1.25;">
+          <strong style="color:#315b55;">🔐 Token:</strong>
+          <code style="color:#244e49;overflow-wrap:anywhere;">${
+            tokenMount ? `${escapeHtml(tokenMount.destination)} (provider only)` : "not mounted"
+          }</code><br/>
+          <strong style="color:#315b55;">Zone:</strong>
+          <code style="color:#244e49;overflow-wrap:anywhere;">${escapeHtml(zone?.name || "—")}</code>
         </div>
       </div>
     `;
@@ -3221,6 +3385,8 @@ const renderNodes = () => {
     command: string[],
     ocapConsume: string[] = [],
     ocapPublish: string[] = [],
+    ocapPublishCommands: Record<string, string[]> = {},
+    mounts: WorkloadMount[] = [],
   ): ProtectWorkload | undefined => {
     const zone = protectZones.find(
       (item) =>
@@ -3301,6 +3467,9 @@ const renderNodes = () => {
       command,
       ocapConsumed: ocapConsumed.length > 0 ? ocapConsumed : undefined,
       ocapPublished: ocapPublish.length > 0 ? ocapPublish : undefined,
+      ocapPublishCommands:
+        Object.keys(ocapPublishCommands).length > 0 ? ocapPublishCommands : undefined,
+      mounts: mounts.length > 0 ? mounts : undefined,
     };
 
     protectWorkloads.push(workload);
@@ -3329,6 +3498,24 @@ const renderNodes = () => {
         "OcapConsumed",
         `workload/${name}`,
         `Workload ${name} consumes object capability ${capabilityName}`,
+      );
+    }
+
+    for (const mount of mounts) {
+      addEvent(
+        "Normal",
+        "MountAttached",
+        `workload/${name}`,
+        `Mounted ${mount.source} at ${mount.destination}${mount.readOnly ? " (read-only)" : ""}`,
+      );
+    }
+
+    for (const capabilityName of ocapPublish) {
+      addEvent(
+        "Normal",
+        "OcapPublished",
+        `workload/${name}`,
+        `Workload ${name} published object capability ${capabilityName}`,
       );
     }
 
@@ -3750,6 +3937,171 @@ const renderNodes = () => {
     return false;
   };
 
+  // edera-dev/protect is private, so the browser can't fetch its README
+  // without the token the real provider holds. Public repositories are
+  // fetched live; this excerpt stands in for the private one.
+  const README_FALLBACKS: Record<string, string> = {
+    protect: `# Edera Protect
+
+Edera Protect runs containers and Kubernetes pods inside isolated zones.
+Each zone is a lightweight virtual machine with its own kernel, so a
+compromised workload never shares the host kernel with its neighbours.
+
+## Components
+
+- protect-daemon: manages zones and workloads on a node
+- protect: the CLI for zones, workloads, images and object capabilities
+- Edera runtime: the Kubernetes RuntimeClass that schedules pods into zones
+
+## Getting started
+
+See https://docs.edera.dev for installation and usage.
+`,
+  };
+
+  const readmeLanguageForImage = (image: string): ReadmeLanguage =>
+    README_LANGUAGES.find((language) =>
+      image.startsWith(`${README_IMAGE_PREFIX}${language}`),
+    ) ?? "rust";
+
+  // Error text each readme-fetch implementation prints (see rust/, python/
+  // and typescript/ in this repo).
+  const readmeFetchError = (
+    language: ReadmeLanguage,
+    kind: "no-token" | "http",
+    url = "",
+    status = 404,
+    statusText = "Not Found",
+  ): string => {
+    if (kind === "no-token") {
+      return {
+        rust: "status: No such file or directory (os error 2)",
+        python: `status: [Errno 2] No such file or directory: '${README_TOKEN_MOUNT_PATH}'`,
+        typescript: `status: ENOENT: no such file or directory, open '${README_TOKEN_MOUNT_PATH}'`,
+      }[language];
+    }
+    return {
+      rust: `status: HTTP status client error (${status} ${statusText}) for url (${url})`,
+      python: `status: HTTP Error ${status}: ${statusText}`,
+      typescript: `status: HTTP status ${status} ${statusText} for url (${url})`,
+    }[language];
+  };
+
+  const dialObjectCapability = async (capability: string, args: string[]) => {
+    const provider = protectWorkloads.find(
+      (workload) =>
+        workload.state === "running" &&
+        workload.ocapPublishCommands?.[capability],
+    );
+
+    if (!provider) {
+      printHtml(
+        `<span style="color:#ff7373;">Error: object capability "${escapeHtml(
+          capability,
+        )}" is not published by a running workload.</span>`,
+      );
+      return;
+    }
+
+    const command = [...provider.ocapPublishCommands![capability], ...args];
+    addEvent(
+      "Normal",
+      "OcapDialed",
+      `workload/${provider.name}`,
+      `Dialed ${capability}: ${command.join(" ")}`,
+    );
+
+    if (command[0] !== "/readme-fetch") {
+      printHtml(
+        `<span style="color:#ff7373;">${escapeHtml(command[0])}: not found in ${escapeHtml(provider.image)}</span>`,
+      );
+      return;
+    }
+
+    const language = readmeLanguageForImage(provider.image);
+    const [, subcommand, repo, ...extra] = command;
+    const isValid =
+      subcommand === "get" &&
+      !!repo &&
+      extra.length === 0 &&
+      /^[A-Za-z0-9]+$/.test(repo);
+
+    if (!isValid) {
+      lastReadmeAction = "denied";
+      lastReadmeRepo = args.join(" ");
+      printHtml(`<span style="color:#ff7373;">usage: get &lt;repo&gt;</span>`);
+      printHtml(
+        `<span style="color:#a8cfca;"># The publisher fixed the command to "${escapeHtml(
+          README_CAPABILITY_COMMAND,
+        )}". Callers only choose an alphanumeric edera-dev repository; nothing else is reachable.</span>`,
+      );
+      updateDashboard();
+      markDemoStepComplete("readme-dial-invalid");
+      return;
+    }
+
+    const hasToken = provider.mounts?.some(
+      (mount) => mount.destination === README_TOKEN_MOUNT_PATH,
+    );
+    if (!hasToken) {
+      lastReadmeAction = "error";
+      lastReadmeRepo = repo;
+      printHtml(
+        `<span style="color:#ff7373;">${escapeHtml(readmeFetchError(language, "no-token"))}</span>`,
+      );
+      printHtml(
+        `<span style="color:#a8cfca;"># The provider has no token. Relaunch it with --mounts src=${README_TOKEN_HOST_PATH}:dst=${README_TOKEN_MOUNT_PATH}:ro=true</span>`,
+      );
+      updateDashboard();
+      return;
+    }
+
+    const url = `https://raw.githubusercontent.com/edera-dev/${repo}/main/README.md`;
+    let body: string | undefined;
+    let status = 404;
+    let statusText = "Not Found";
+    try {
+      const response = await fetch(url);
+      if (response.ok) {
+        body = await response.text();
+      } else {
+        status = response.status;
+        statusText = response.statusText || statusText;
+      }
+    } catch {
+      // Offline or blocked: fall through to the bundled excerpt, if any.
+    }
+    body ??= README_FALLBACKS[repo];
+
+    lastReadmeRepo = repo;
+    if (body === undefined) {
+      lastReadmeAction = "error";
+      printHtml(
+        `<span style="color:#ff7373;">${escapeHtml(
+          readmeFetchError(language, "http", url, status, statusText),
+        )}</span>`,
+      );
+      updateDashboard();
+      return;
+    }
+
+    const MAX_LINES = 200;
+    const lines = body.replace(/\s+$/, "").split("\n");
+    const shown = lines.slice(0, MAX_LINES).join("\n");
+    printPre(`<span style="color:#dff7f0;">${escapeHtml(shown)}</span>`);
+    if (lines.length > MAX_LINES) {
+      printHtml(
+        `<span style="color:#a8cfca;">… ${lines.length - MAX_LINES} more lines</span>`,
+      );
+    }
+    printHtml(
+      `<span style="color:#00e5d4;"># Fetched by ${escapeHtml(provider.name)} (${language}). The GitHub token stayed in the provider; the caller only received the README.</span>`,
+    );
+    lastReadmeAction = "allowed";
+    updateDashboard();
+    markDemoStepComplete("readme-dial");
+  };
+
   const execProtectWorkload = (
     identifier: string,
     command: string[],
@@ -4161,6 +4513,16 @@ const renderNodes = () => {
             <code>protect workload exec ${OCAP_WORKLOAD_NAME} -- curl https://example.com</code>
             <span>Try network access that no capability grants.</span>
           </div>
+
+          <div class="cli-help-command">
+            <code>${escapeHtml(README_WORKLOAD_LAUNCH_COMMAND)}</code>
+            <span>Run the README fetcher as a provider that holds the token and publishes ${README_CAPABILITY}.</span>
+          </div>
+
+          <div class="cli-help-command">
+            <code>protect object-capability dial ${README_CAPABILITY} ${README_DIAL_REPO}</code>
+            <span>Dial the published capability to fetch an edera-dev README.</span>
+          </div>
         </div>
 
         <div class="cli-help-section">
@@ -4462,6 +4824,8 @@ Options:
           Zone to launch the workload in, by name or UUID
   -n, --name <NAME>
           Name of the workload
+      --mounts <MOUNTS>
+          Host path to mount into the workload as src=HOST_PATH:dst=PATH[:ro=true] (repeatable)
       --ocap-consume <OCAP_CONSUME>
           Object capability to consume as NAME[=PROVIDER] (repeatable). NAME may be a capability type implemented by several providers; PROVIDER pins one implementation instead of taking the highest-priority one, e.g. 'dev.edera/bar=dev.edera/foo'
       --ocap-publish <OCAP_PUBLISH>
@@ -4543,6 +4907,11 @@ Options:
           <div class="cli-help-command">
             <code>--ocap-consume / --ocap-publish / --ocap-implements</code>
             <span>Consume or provide object capabilities. See <code style="color:#b8ff3c;">protect workload launch -h</code>.</span>
+          </div>
+
+          <div class="cli-help-command">
+            <code>protect object-capability dial &lt;CAPABILITY&gt; [ARGS]...</code>
+            <span>Call a capability published by a running workload with the given arguments.</span>
           </div>
 
           <div class="cli-help-command">
@@ -4670,6 +5039,24 @@ Options:
         image: workload.image,
         command: workload.command,
         ...(workload.ocapConsumed?.length ? { ocapConsume: workload.ocapConsumed } : {}),
+        ...(workload.ocapPublished?.length
+          ? {
+              ocapPublish: workload.ocapPublished.map((capabilityName) =>
+                workload.ocapPublishCommands?.[capabilityName]
+                  ? `${capabilityName}=${workload.ocapPublishCommands[capabilityName].join(" ")}`
+                  : capabilityName,
+              ),
+            }
+          : {}),
+        ...(workload.mounts?.length
+          ? {
+              mounts: workload.mounts.map((mount) => ({
+                src: mount.source,
+                dst: mount.destination,
+                ro: mount.readOnly,
+              })),
+            }
+          : {}),
       })),
     };
     printPre(escapeHtml(JSON.stringify(payload, null, pretty ? 2 : 0)));
@@ -5091,6 +5478,9 @@ Options:
         ) {
           markDemoStepComplete("protect-zone-launch");
         }
+        if (name === README_ZONE_NAME) {
+          markDemoStepComplete("readme-zone-launch");
+        }
 
         return true;
       }
@@ -5138,6 +5528,9 @@ Options:
         markDemoStepComplete("zone-destroy");
         if (activeDemoMode === "agent-sandbox" && identifier === OCAP_ZONE_NAME) {
           markDemoStepComplete("protect-zone-destroy");
+        }
+        if (identifier === README_ZONE_NAME) {
+          markDemoStepComplete("readme-zone-destroy");
         }
 
         return true;
@@ -5197,6 +5590,7 @@ Options:
         const ocapConsume: string[] = [];
         const ocapPublish: string[] = [];
         const ocapImplements: string[] = [];
+        const mountSpecs: string[] = [];
         const positional: string[] = [];
 
         // Flags that take a value, in both "--flag value" and "--flag=value" form.
@@ -5208,6 +5602,7 @@ Options:
           "--ocap-consume": (value) => ocapConsume.push(value),
           "--ocap-publish": (value) => ocapPublish.push(value),
           "--ocap-implements": (value) => ocapImplements.push(value),
+          "--mounts": (value) => mountSpecs.push(value),
         };
 
         for (let i = 3; i < tokens.length; i++) {
@@ -5246,7 +5641,53 @@ Options:
           return true;
         }
 
-        const publishedNames = ocapPublish.map((entry) => entry.split("=")[0]);
+        // --mounts src=HOST:dst=GUEST[:ro=true|false]
+        const mounts: WorkloadMount[] = [];
+        for (const spec of mountSpecs) {
+          const fields: Record<string, string> = {};
+          for (const part of spec.split(":")) {
+            const equalsAt = part.indexOf("=");
+            if (equalsAt > 0) fields[part.slice(0, equalsAt)] = part.slice(equalsAt + 1);
+          }
+          if (!fields.src || !fields.dst) {
+            printHtml(
+              `<span style="color:#ff7373;">Error: --mounts expects src=&lt;HOST_PATH&gt;:dst=&lt;PATH&gt;[:ro=true], got "${escapeHtml(spec)}".</span>`,
+            );
+            return true;
+          }
+          if (!HOST_FILES.has(fields.src) && getVirtualFile(resolveVirtualPath(fields.src)) === undefined) {
+            printHtml(
+              `<span style="color:#ff7373;">Error: mount source "${escapeHtml(fields.src)}" does not exist.</span>`,
+            );
+            return true;
+          }
+          mounts.push({
+            source: fields.src,
+            destination: fields.dst,
+            readOnly: fields.ro === "true",
+          });
+        }
+
+        // --ocap-publish NAME[=COMMAND ARGS]: the command is split with shell
+        // word rules and run when the capability is dialed.
+        const publishedNames: string[] = [];
+        const publishCommands: Record<string, string[]> = {};
+        for (const entry of ocapPublish) {
+          const equalsAt = entry.indexOf("=");
+          const capabilityName = equalsAt >= 0 ? entry.slice(0, equalsAt) : entry;
+          if (!capabilityName) {
+            printHtml(
+              `<span style="color:#ff7373;">Error: --ocap-publish requires NAME[=COMMAND ARGS].</span>`,
+            );
+            return true;
+          }
+          publishedNames.push(capabilityName);
+          if (equalsAt >= 0) {
+            const commandWords = tokenize(entry.slice(equalsAt + 1));
+            if (commandWords.length > 0) publishCommands[capabilityName] = commandWords;
+          }
+        }
+
         for (const entry of ocapImplements) {
           const implementer = entry.split("=")[0];
           if (!publishedNames.includes(implementer)) {
@@ -5266,10 +5707,20 @@ Options:
           command,
           ocapConsume,
           publishedNames,
+          publishCommands,
+          mounts,
         );
 
         if (!launched) {
           return true;
+        }
+
+        if (
+          name === README_WORKLOAD_NAME &&
+          launched.ocapPublishCommands?.[README_CAPABILITY] &&
+          launched.mounts?.some((mount) => mount.destination === README_TOKEN_MOUNT_PATH)
+        ) {
+          markDemoStepComplete("readme-workload-launch");
         }
 
         if (
@@ -5371,6 +5822,29 @@ Options:
         )}</span>`,
       );
 
+      return true;
+    }
+
+    if (tokens[1] === "object-capability") {
+      const subcommand = tokens[2];
+
+      if (subcommand === "dial") {
+        const capability = tokens[3] || "";
+        if (!capability) {
+          printHtml(
+            `<span style="color:#ff7373;">Usage: protect object-capability dial &lt;CAPABILITY&gt; [ARGS]...</span>`,
+          );
+          return true;
+        }
+        await dialObjectCapability(capability, tokens.slice(4));
+        return true;
+      }
+
+      printHtml(
+        `<span style="color:#ff7373;">Unknown protect object-capability command: ${escapeHtml(
+          tokens.slice(2).join(" "),
+        )}. Try: protect object-capability dial &lt;CAPABILITY&gt; [ARGS]...</span>`,
+      );
       return true;
     }
 

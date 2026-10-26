@@ -1099,7 +1099,7 @@ const ALL_AGENT_SANDBOX_DEMO_STEPS: DemoStep[] = [
     id: "protect-zone-list-initial",
     title: "List Edera zones",
     description:
-      "Use the Protect CLI to list zones on this node. Nothing is running yet: the agent's zone, and the capability it will use, are both created in the next steps.",
+      "Use the Protect CLI to list zones on this node. Nothing is running yet: a zone, and the capability it publishes, are created in the next steps.",
     command: "protect zone list",
   },
   {
@@ -1176,7 +1176,7 @@ const ALL_AGENT_SANDBOX_DEMO_STEPS: DemoStep[] = [
     id: "protect-zone-destroy",
     title: "Destroy the zone",
     description:
-      "Tear down the zone. Its workloads and the capability it published go with it. The --wait flag makes the lifecycle transition explicit in the terminal.",
+      "Tear down the zone. The capability it published goes with it, along with any workloads running inside. The --wait flag makes the lifecycle transition explicit in the terminal.",
     command: `protect zone destroy ${OCAP_ZONE_NAME} --wait`,
   },
   {
@@ -1449,10 +1449,22 @@ const ALL_AGENT_SANDBOX_DEMO_STEPS: DemoStep[] = [
 // The guide ends once the SandboxSession is cleaned up, which is where the
 // completion pop-up appears. This keeps the demo focused on object capabilities.
 const LAST_GUIDED_STEP_ID = "session-cleanup";
+// Steps kept out of the guide to keep it short. Their commands still work in
+// the terminal (and are listed in `help`); they just aren't walked through.
+const UNGUIDED_STEP_IDS = new Set([
+  "protect-zone-list-ready",
+  "ocap-workload-help",
+  "ocap-workload-launch",
+  "ocap-no-credentials",
+  "ocap-allowed",
+  "ocap-denied-repository",
+  "ocap-denied-network",
+  "ocap-compromise",
+]);
 const AGENT_SANDBOX_DEMO_STEPS: DemoStep[] = ALL_AGENT_SANDBOX_DEMO_STEPS.slice(
   0,
   ALL_AGENT_SANDBOX_DEMO_STEPS.findIndex((step) => step.id === LAST_GUIDED_STEP_ID) + 1,
-);
+).filter((step) => !UNGUIDED_STEP_IDS.has(step.id));
 
 async function initTerminalDemo() {
 

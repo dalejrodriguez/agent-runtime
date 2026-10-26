@@ -904,6 +904,179 @@ const README_WORKLOAD_LAUNCH_COMMAND =
 // a GitHub token at /tmp/token for the readme provider to mount.
 const HOST_FILES = new Set<string>([README_TOKEN_HOST_PATH]);
 
+// The readme-fetch sources ship with the lab. rust/, python/ and typescript/
+// from this repo are bundled verbatim at build time, so `ls`, `cat` and
+// `docker build` in the terminal always see the files committed here.
+const README_FETCH_SOURCES: Record<string, string> = Object.fromEntries(
+  Object.entries(
+    import.meta.glob(
+      [
+        "../{rust,python,typescript}/**/*",
+        "!../**/node_modules/**",
+        "!../**/target/**",
+        "!../**/dist/**",
+      ],
+      { query: "?raw", import: "default", eager: true },
+    ) as Record<string, string>,
+  ).map(([path, content]) => [path.replace(/^\.\.\//, "/"), content]),
+);
+
+// ---------------------------------------------------------------------------
+// Cluster object capabilities (runtime.edera.dev/v1alpha1).
+// Capability objects declare what exists in the cluster; a SandboxTemplate
+// picks a subset of them; a SandboxSession picks a subset of its template's
+// and the controller creates a zone + workload that consumes exactly those.
+// ---------------------------------------------------------------------------
+const CAPABILITY_MANIFEST_PATH = "/examples/capability.yaml";
+const SANDBOX_TEMPLATE_PATH = "/examples/sandbox-template.yaml";
+const SANDBOX_SESSION_PATH = "/examples/sandbox-session.yaml";
+const SANDBOX_SESSION_PROD_PATH = "/examples/sandbox-session-prod.yaml";
+const SANDBOX_SDK_PATH = "/examples/session.py";
+const SANDBOX_TEMPLATE_NAME = "claude-tmpl";
+const SANDBOX_SESSION_NAME = "claude-session-0";
+
+const CAPABILITY_MANIFEST_YAML = `apiVersion: runtime.edera.dev/v1alpha1
+kind: Capability
+metadata:
+  name: github
+spec:
+  description: git over HTTPS to github.com, for the repositories granted below
+  http:
+    endpoint: https://github.com
+    rules:
+    - method: GET
+      path: /kubernetes/kubernetes.git
+    - method: POST
+      path: /kubernetes/kubernetes.git
+  auth:
+    scheme: basic
+    secretRef:
+      name: github-token
+---
+apiVersion: runtime.edera.dev/v1alpha1
+kind: Capability
+metadata:
+  name: linear-search
+spec:
+  description: search issues in Linear (read-only)
+  http:
+    endpoint: https://api.linear.app
+    rules:
+    - method: POST
+      path: /graphql
+  auth:
+    scheme: bearer
+    secretRef:
+      name: linear-api-key
+---
+apiVersion: runtime.edera.dev/v1alpha1
+kind: Capability
+metadata:
+  name: kubernetes-prod
+spec:
+  description: read-only access to the production cluster API
+  http:
+    endpoint: https://prod.k8s.internal:6443
+    rules:
+    - method: GET
+      path: /api/v1/namespaces/*/pods
+  auth:
+    scheme: bearer
+    secretRef:
+      name: kubeconfig-prod
+---
+apiVersion: runtime.edera.dev/v1alpha1
+kind: Capability
+metadata:
+  name: kubernetes-dev
+spec:
+  description: read/write access to the dev cluster API
+  http:
+    endpoint: https://dev.k8s.internal:6443
+    rules:
+    - method: "*"
+      path: /api/v1/namespaces/dev/*
+  auth:
+    scheme: bearer
+    secretRef:
+      name: kubeconfig-dev`;
+
+const SANDBOX_TEMPLATE_YAML = `apiVersion: runtime.edera.dev/v1alpha1
+kind: SandboxTemplate
+metadata:
+  name: claude-tmpl
+spec:
+  capabilities:
+  - kubernetes-dev
+  - github
+  - linear-search
+  podTemplate:
+    spec:
+      containers:
+        - name: workload
+          image: registry.k8s.io/pause:latest`;
+
+const SANDBOX_SESSION_YAML = `apiVersion: runtime.edera.dev/v1alpha1
+kind: SandboxSession
+metadata:
+  name: claude-session-0
+spec:
+  capabilities:
+  - kubernetes-dev
+  - github
+  templateRef:
+    name: claude-tmpl`;
+
+const SANDBOX_SESSION_PROD_YAML = `apiVersion: runtime.edera.dev/v1alpha1
+kind: SandboxSession
+metadata:
+  name: claude-session-prod
+spec:
+  capabilities:
+  - kubernetes-prod
+  templateRef:
+    name: claude-tmpl`;
+
+const SANDBOX_SDK_PY = `from edera_runtime import SandboxSession
+
+# The SDK turns this into a SandboxSession object (templateRef + capabilities),
+# waits for its zone, runs the command inside it, and deletes the session on
+# exit. \`from\` is a Python keyword, so the template is passed as template=.
+with SandboxSession(template="claude-tmpl", capabilities=["kubernetes-dev", "github"]) as s:
+    s.sandbox.run("agent.py --repo my-repo")
+`;
+
+// Minimal reader for the runtime.edera.dev manifests above.
+interface RuntimeManifestDoc {
+  kind: string;
+  name: string;
+  capabilities: string[];
+  templateRef?: string;
+  image?: string;
+}
+
+const parseRuntimeManifest = (yaml: string): RuntimeManifestDoc[] =>
+  yaml
+    .split(/^---\s*$/m)
+    .map((doc) => {
+      const capabilities: string[] = [];
+      const capabilitiesBlock = doc.match(/^\s*capabilities:\s*\n((?:\s*-\s*\S+\s*\n?)+)/m);
+      if (capabilitiesBlock) {
+        for (const line of capabilitiesBlock[1].split("\n")) {
+          const item = line.match(/^\s*-\s*(\S+)/)?.[1];
+          if (item) capabilities.push(item);
+        }
+      }
+      return {
+        kind: doc.match(/^kind:\s*(\S+)/m)?.[1] || "",
+        name: doc.match(/^metadata:\s*\n\s+name:\s*(\S+)/m)?.[1] || "",
+        capabilities,
+        templateRef: doc.match(/templateRef:\s*\n\s+name:\s*(\S+)/)?.[1],
+        image: doc.match(/image:\s*(\S+)/)?.[1],
+      };
+    })
+    .filter((doc) => doc.kind && doc.name);
+
 // The full walkthrough, including the Sandbox / Snapshot / Fork steps. Their
 // commands and manifests still work in the terminal; the guide only shows the
 // object capability steps (see AGENT_SANDBOX_DEMO_STEPS below).
@@ -1021,6 +1194,21 @@ const ALL_AGENT_SANDBOX_DEMO_STEPS: DemoStep[] = [
     command: `protect zone launch -n ${README_ZONE_NAME}`,
   },
   {
+    id: "readme-source",
+    title: "Read the README fetcher",
+    description:
+      `The provider is a small program, written the same way in <code class='guide-code'>rust/</code>, <code class='guide-code'>python/</code> and <code class='guide-code'>typescript/</code>. It idles until called with <code class='guide-code'>get &lt;repo&gt;</code>, accepts only alphanumeric repository names, and reads its GitHub token from <code class='guide-code'>${README_TOKEN_MOUNT_PATH}</code>.`,
+    command: "cat rust/main.rs",
+  },
+  {
+    id: "readme-image-build",
+    title: "Build the provider image",
+    description:
+      `Each language directory has a Dockerfile whose entrypoint is <code class='guide-code'>/readme-fetch idle</code>. The images are already published to ttl.sh for this lab, so building is optional.`,
+    command: `docker build -t ${README_WORKLOAD_IMAGE} rust`,
+    optional: true,
+  },
+  {
     id: "readme-workload-launch",
     title: "Launch the README fetcher as a provider",
     description:
@@ -1055,6 +1243,91 @@ const ALL_AGENT_SANDBOX_DEMO_STEPS: DemoStep[] = [
       "The Edera runtime controller already running in <code class='guide-code'>edera-runtime</code> serves three resources under <code class='guide-code'>runtime.edera.dev/v1alpha1</code>: <code class='guide-code'>Sandbox</code>, <code class='guide-code'>Snapshot</code> and <code class='guide-code'>Fork</code>. Confirm their CRDs are installed.",
     command:
       "kubectl get crd sandboxes.runtime.edera.dev snapshots.runtime.edera.dev forks.runtime.edera.dev",
+  },
+  {
+    id: "capability-crds",
+    title: "Verify the capability CRDs",
+    description:
+      "The same controller serves the capability resources: <code class='guide-code'>Capability</code> declares what the cluster can grant, <code class='guide-code'>SandboxTemplate</code> picks a subset of those, and <code class='guide-code'>SandboxSession</code> picks a subset of its template's.",
+    command:
+      "kubectl get crd capabilities.runtime.edera.dev sandboxtemplates.runtime.edera.dev sandboxsessions.runtime.edera.dev",
+  },
+  {
+    id: "capability-apply",
+    title: "Create the cluster capabilities",
+    description:
+      "<code class='guide-code'>examples/capability.yaml</code> declares four capabilities: <code class='guide-code'>github</code>, <code class='guide-code'>linear-search</code>, <code class='guide-code'>kubernetes-prod</code> and <code class='guide-code'>kubernetes-dev</code>. Each names an endpoint, the requests it allows, and the Secret holding its credential.",
+    command: "kubectl apply -f examples/capability.yaml",
+  },
+  {
+    id: "capability-list",
+    title: "List the capabilities",
+    description:
+      "Every capability exists in the cluster, but nothing consumes one yet. Its credential stays in a Secret the OCAP proxy reads; no sandbox ever receives it.",
+    command: "kubectl get capability",
+  },
+  {
+    id: "template-manifest",
+    title: "Read the SandboxTemplate",
+    description:
+      `A template picks the capabilities its sessions may ask for. <code class='guide-code'>${SANDBOX_TEMPLATE_NAME}</code> allows <code class='guide-code'>kubernetes-dev</code>, <code class='guide-code'>github</code> and <code class='guide-code'>linear-search</code>, but not <code class='guide-code'>kubernetes-prod</code>.`,
+    command: "cat examples/sandbox-template.yaml",
+  },
+  {
+    id: "template-apply",
+    title: "Create the template",
+    description:
+      "Apply the template. Every capability it lists has to exist in the cluster.",
+    command: "kubectl apply -f examples/sandbox-template.yaml",
+  },
+  {
+    id: "session-apply",
+    title: "Start a SandboxSession",
+    description:
+      `<code class='guide-code'>${SANDBOX_SESSION_NAME}</code> references the template and asks for two of its three capabilities. The controller creates a zone and a workload that consume exactly <code class='guide-code'>kubernetes-dev</code> and <code class='guide-code'>github</code>.`,
+    command: "kubectl apply -f examples/sandbox-session.yaml",
+  },
+  {
+    id: "session-inspect",
+    title: "Inspect the session",
+    description:
+      "List the session with its pod. It runs with the <code class='guide-code'>edera</code> runtime, and its zone appears in the Edera Zones panel.",
+    command: "kubectl get sandboxsession,pods",
+  },
+  {
+    id: "session-workload",
+    title: "See what the session's workload consumes",
+    description:
+      "From the Protect side, the session is an ordinary zone and workload. Its <code class='guide-code'>ocapConsume</code> lists the two capabilities, and nothing else.",
+    command: "protect workload list -o json-pretty",
+  },
+  {
+    id: "session-denied",
+    title: "Ask for a capability the template doesn't grant",
+    description:
+      "This session asks for <code class='guide-code'>kubernetes-prod</code>. It exists in the cluster, but the template doesn't include it, so the session is rejected.",
+    command: "kubectl apply -f examples/sandbox-session-prod.yaml",
+  },
+  {
+    id: "sdk-read",
+    title: "Read the SDK version",
+    description:
+      "The SDK wraps all of this in a context manager. <code class='guide-code'>SandboxSession(...)</code> becomes the same SandboxSession object, and leaving the <code class='guide-code'>with</code> block deletes it.",
+    command: "cat examples/session.py",
+  },
+  {
+    id: "sdk-run",
+    title: "Run it",
+    description:
+      "Run the script. Watch the SandboxSession it generates, the zone come up in the Edera Zones panel, the command run inside it, and the session clean itself up.",
+    command: "python3 examples/session.py",
+  },
+  {
+    id: "session-cleanup",
+    title: "Delete the session",
+    description:
+      `Delete <code class='guide-code'>${SANDBOX_SESSION_NAME}</code>. Its zone and workload go with it; the template and capabilities stay for the next session.`,
+    command: `kubectl delete sandboxsession ${SANDBOX_SESSION_NAME}`,
   },
   {
     id: "edera-sandbox-manifest",
@@ -1173,9 +1446,9 @@ const ALL_AGENT_SANDBOX_DEMO_STEPS: DemoStep[] = [
   },
 ];
 
-// The guide ends once the Edera Sandbox CRDs are verified, which is where the
+// The guide ends once the SandboxSession is cleaned up, which is where the
 // completion pop-up appears. This keeps the demo focused on object capabilities.
-const LAST_GUIDED_STEP_ID = "edera-crds";
+const LAST_GUIDED_STEP_ID = "session-cleanup";
 const AGENT_SANDBOX_DEMO_STEPS: DemoStep[] = ALL_AGENT_SANDBOX_DEMO_STEPS.slice(
   0,
   ALL_AGENT_SANDBOX_DEMO_STEPS.findIndex((step) => step.id === LAST_GUIDED_STEP_ID) + 1,
@@ -1551,6 +1824,15 @@ async function initTerminalDemo() {
     "/storage/local-nvme/local-nvme-pv.yaml": LOCAL_NVME_PV_YAML_CONTENT,
     "/storage/local-nvme/local-nvme-pvc.yaml": LOCAL_NVME_PVC_YAML_CONTENT,
     "/storage/local-nvme/local-nvme-deployment.yaml": LOCAL_NVME_DEPLOYMENT_YAML_CONTENT,
+
+    // readme-fetch provider sources (rust/, python/, typescript/).
+    ...README_FETCH_SOURCES,
+
+    [CAPABILITY_MANIFEST_PATH]: CAPABILITY_MANIFEST_YAML,
+    [SANDBOX_TEMPLATE_PATH]: SANDBOX_TEMPLATE_YAML,
+    [SANDBOX_SESSION_PATH]: SANDBOX_SESSION_YAML,
+    [SANDBOX_SESSION_PROD_PATH]: SANDBOX_SESSION_PROD_YAML,
+    [SANDBOX_SDK_PATH]: SANDBOX_SDK_PY,
   };
   const GPU_PCI_LOCATION = "0000:18:00.0";
   const GPU_PCI_ID = "10de:1eb8";
@@ -2520,7 +2802,9 @@ const renderNodes = () => {
       lastOcapAction = "idle";
     }
 
-    if (!publishingZone && !readmeProvider) {
+    const clusterCard = renderClusterCapabilitiesCard();
+
+    if (!publishingZone && !readmeProvider && !clusterCard) {
       capabilityCount.innerText = "0 Capabilities";
       capabilityGrid.innerHTML = `
         <div class="empty-state">
@@ -2530,11 +2814,13 @@ const renderNodes = () => {
       return;
     }
 
-    const capabilityTotal = (publishingZone ? 1 : 0) + (readmeProvider ? 1 : 0);
+    const capabilityTotal =
+      (publishingZone ? 1 : 0) + (readmeProvider ? 1 : 0) + clusterCapabilities.size;
     capabilityCount.innerText =
       capabilityTotal === 1 ? "1 Capability" : `${capabilityTotal} Capabilities`;
 
-    const readmeCard = readmeProvider ? renderReadmeCapabilityCard(readmeProvider) : "";
+    const readmeCard =
+      (readmeProvider ? renderReadmeCapabilityCard(readmeProvider) : "") + clusterCard;
     if (!publishingZone) {
       capabilityGrid.innerHTML = readmeCard;
       return;
@@ -2607,6 +2893,41 @@ const renderNodes = () => {
         </div>
       </div>
     ` + readmeCard;
+  };
+
+  // Cluster Capability objects, with the sessions bound to each and the
+  // templates that allow it.
+  const renderClusterCapabilitiesCard = (): string => {
+    if (clusterCapabilities.size === 0) return "";
+    const rows = [...clusterCapabilities.keys()]
+      .sort()
+      .map((name) => {
+        const users = sessionsUsing(name);
+        const templates = [...sandboxTemplates.entries()]
+          .filter(([, template]) => template.capabilities.includes(name))
+          .map(([templateName]) => templateName);
+        const bound = users.length > 0;
+        return `
+          <div style="display:grid;grid-template-columns:minmax(120px,.8fr) 80px minmax(140px,1fr) minmax(140px,1fr);gap:10px;align-items:center;font-size:11px;padding:4px 0;border-top:1px solid rgba(13,63,57,.08);">
+            <code style="font-weight:800;color:#102f2c;">${escapeHtml(name)}</code>
+            <span style="font-size:10px;font-weight:800;letter-spacing:.08em;color:${bound ? "#2f7d14" : "#276b63"};">${bound ? "BOUND" : "AVAILABLE"}</span>
+            <span style="color:#4b6864;overflow-wrap:anywhere;">Templates: ${escapeHtml(templates.join(", ") || "—")}</span>
+            <span style="color:#4b6864;overflow-wrap:anywhere;">Sessions: <code style="color:#244e49;">${escapeHtml(users.join(", ") || "—")}</code></span>
+          </div>`;
+      })
+      .join("");
+    return `
+      <div
+        class="capability-card"
+        style="padding:10px 14px;margin-top:10px;border:1px solid rgba(13,63,57,.12);border-radius:14px;background:#f5fbf9;color:#163c38;box-sizing:border-box;"
+      >
+        <div style="display:flex;align-items:baseline;gap:10px;margin-bottom:6px;">
+          <div style="font-size:14px;font-weight:800;color:#102f2c;">Cluster capabilities</div>
+          <span style="font-size:11px;color:#4b6864;">capabilities.runtime.edera.dev · credentials stay with the OCAP proxy</span>
+        </div>
+        ${rows}
+      </div>
+    `;
   };
 
   const renderReadmeCapabilityCard = (provider: ProtectWorkload): string => {
@@ -4526,6 +4847,45 @@ See https://docs.edera.dev for installation and usage.
         </div>
 
         <div class="cli-help-section">
+          <div class="cli-help-section-title">Capabilities, Templates and Sessions</div>
+
+          <div class="cli-help-command">
+            <code>kubectl apply -f examples/capability.yaml</code>
+            <span>Create the cluster's Capability objects.</span>
+          </div>
+
+          <div class="cli-help-command">
+            <code>kubectl get capability</code>
+            <span>List capabilities and the sessions bound to them.</span>
+          </div>
+
+          <div class="cli-help-command">
+            <code>kubectl apply -f examples/sandbox-template.yaml</code>
+            <span>Create a template allowing a subset of the cluster's capabilities.</span>
+          </div>
+
+          <div class="cli-help-command">
+            <code>kubectl apply -f examples/sandbox-session.yaml</code>
+            <span>Start a session: a zone + workload consuming a subset of the template's capabilities.</span>
+          </div>
+
+          <div class="cli-help-command">
+            <code>kubectl get sandboxtemplate,sandboxsession</code>
+            <span>List templates and sessions (add ,pods to see session pods).</span>
+          </div>
+
+          <div class="cli-help-command">
+            <code>python3 examples/session.py</code>
+            <span>Run the SDK version, which creates and cleans up its own session.</span>
+          </div>
+
+          <div class="cli-help-command">
+            <code>docker build -t ${README_IMAGE_PREFIX}&lt;language&gt;:1h &lt;language&gt;</code>
+            <span>Build a readme-fetch image from rust/, python/ or typescript/.</span>
+          </div>
+        </div>
+
+        <div class="cli-help-section">
           <div class="cli-help-section-title">AI Agent Sandbox</div>
 
           <div class="cli-help-command">
@@ -5575,6 +5935,15 @@ Options:
           markDemoStepComplete("gpu-workload-list");
         }
 
+        if (
+          workloads.some(
+            (workload) =>
+              workload.name === SANDBOX_SESSION_NAME && workload.ocapConsumed?.length,
+          )
+        ) {
+          markDemoStepComplete("session-workload");
+        }
+
         return true;
       }
 
@@ -5987,6 +6356,9 @@ Kernel isolation: enabled</span>`);
     "sandboxes.runtime.edera.dev",
     "snapshots.runtime.edera.dev",
     "forks.runtime.edera.dev",
+    "capabilities.runtime.edera.dev",
+    "sandboxtemplates.runtime.edera.dev",
+    "sandboxsessions.runtime.edera.dev",
   ];
 
   // Creation time per kind; absent from the map means "not created".
@@ -6452,7 +6824,16 @@ Kernel isolation: enabled</span>`);
           names.map((name) => [{ text: name, color: "#b8ff3c" }, "10m"]),
         ) + `\n\n<span style="color:#00e5d4;">runtime.edera.dev/v1alpha1 served=true</span>`,
       );
-      markDemoStepComplete("edera-crds");
+      if (names.some((name) => name.startsWith("sandboxes."))) {
+        markDemoStepComplete("edera-crds");
+      }
+      if (
+        ["capabilities.", "sandboxtemplates.", "sandboxsessions."].every((prefix) =>
+          names.some((name) => name.startsWith(prefix)),
+        )
+      ) {
+        markDemoStepComplete("capability-crds");
+      }
       return true;
     }
 
@@ -6557,6 +6938,554 @@ Kernel isolation: enabled</span>`);
     return true;
   };
 
+  // -----------------------------------------------------------------------
+  // Capability / SandboxTemplate / SandboxSession (runtime.edera.dev).
+  // A session's capabilities must be a subset of its template's, which must
+  // be a subset of the Capability objects in the cluster. The controller
+  // turns each session into a pod in its own Edera zone whose workload
+  // consumes exactly the session's capabilities.
+  // -----------------------------------------------------------------------
+  type CapabilityKind = "Capability" | "SandboxTemplate" | "SandboxSession";
+
+  interface ClusterCapabilityState {
+    createdAt: number;
+    description: string;
+  }
+  interface SandboxTemplateState {
+    capabilities: string[];
+    image: string;
+    createdAt: number;
+  }
+  interface SandboxSessionState {
+    template: string;
+    capabilities: string[];
+    createdAt: number;
+    yaml: string;
+  }
+
+  const clusterCapabilities = new Map<string, ClusterCapabilityState>();
+  const sandboxTemplates = new Map<string, SandboxTemplateState>();
+  const sandboxSessions = new Map<string, SandboxSessionState>();
+
+  const CAPABILITY_PLURALS: Record<CapabilityKind, string> = {
+    Capability: "capabilities",
+    SandboxTemplate: "sandboxtemplates",
+    SandboxSession: "sandboxsessions",
+  };
+
+  const capabilityDescriptions = Object.fromEntries(
+    CAPABILITY_MANIFEST_YAML.split(/^---\s*$/m).map((doc) => [
+      doc.match(/^metadata:\s*\n\s+name:\s*(\S+)/m)?.[1] || "",
+      doc.match(/description:\s*(.+)$/m)?.[1] || "",
+    ]),
+  );
+
+  const resolveCapabilityKind = (token: string): CapabilityKind | null => {
+    const [base, ...group] = token.toLowerCase().split(".");
+    const groupName = group.join(".");
+    if (groupName && groupName !== "runtime.edera.dev") return null;
+    if (["capability", "capabilities"].includes(base)) return "Capability";
+    if (["sandboxtemplate", "sandboxtemplates"].includes(base)) return "SandboxTemplate";
+    if (["sandboxsession", "sandboxsessions"].includes(base)) return "SandboxSession";
+    return null;
+  };
+
+  const capabilityRef = (kind: CapabilityKind, name: string) =>
+    `${kind.toLowerCase()}.runtime.edera.dev/${name}`;
+
+  const ageSince = (created: number) => {
+    const seconds = Math.max(1, Math.floor((Date.now() - created) / 1000));
+    return seconds < 120 ? `${seconds}s` : `${Math.floor(seconds / 60)}m`;
+  };
+
+  const isSessionPod = (pod: LocalPod, session?: string) =>
+    session
+      ? pod.labels["runtime.edera.dev/session"] === session
+      : pod.labels["runtime.edera.dev/session"] !== undefined;
+
+  // Sessions currently consuming a capability.
+  const sessionsUsing = (capability: string) =>
+    [...sandboxSessions.entries()]
+      .filter(([, session]) => session.capabilities.includes(capability))
+      .map(([name]) => name);
+
+  const applyCapabilityDoc = (
+    doc: RuntimeManifestDoc,
+    sourceFile: string,
+  ): boolean => {
+    if (doc.kind === "Capability") {
+      if (clusterCapabilities.has(doc.name)) {
+        printHtml(`<span style="color:#a8cfca;">${escapeHtml(capabilityRef("Capability", doc.name))} unchanged</span>`);
+        return true;
+      }
+      clusterCapabilities.set(doc.name, {
+        createdAt: Date.now(),
+        description: capabilityDescriptions[doc.name] || "",
+      });
+      addEvent("Normal", "CapabilityCreated", `capability/${doc.name}`, `Capability ${doc.name} accepted by the OCAP proxy`);
+      printHtml(`<span style="color:#b8ff3c;">${escapeHtml(capabilityRef("Capability", doc.name))} created</span>`);
+      return true;
+    }
+
+    if (doc.kind === "SandboxTemplate") {
+      if (sandboxTemplates.has(doc.name)) {
+        printHtml(`<span style="color:#a8cfca;">${escapeHtml(capabilityRef("SandboxTemplate", doc.name))} unchanged</span>`);
+        return true;
+      }
+      const missingIndex = doc.capabilities.findIndex((cap) => !clusterCapabilities.has(cap));
+      if (missingIndex >= 0) {
+        printEderaError(
+          `Error from server (Invalid): error when creating "${sourceFile}": SandboxTemplate.runtime.edera.dev "${doc.name}" is invalid: spec.capabilities[${missingIndex}]: Not found: "${doc.capabilities[missingIndex]}"`,
+        );
+        return false;
+      }
+      sandboxTemplates.set(doc.name, {
+        capabilities: doc.capabilities,
+        image: doc.image || "registry.k8s.io/pause:latest",
+        createdAt: Date.now(),
+      });
+      addEvent(
+        "Normal",
+        "TemplateCreated",
+        `sandboxtemplate/${doc.name}`,
+        `Template ${doc.name} allows ${doc.capabilities.join(", ")}`,
+      );
+      printHtml(`<span style="color:#b8ff3c;">${escapeHtml(capabilityRef("SandboxTemplate", doc.name))} created</span>`);
+      markDemoStepComplete("template-apply");
+      return true;
+    }
+
+    if (doc.kind === "SandboxSession") {
+      return createSandboxSession(
+        doc.name,
+        doc.templateRef || "",
+        doc.capabilities,
+        sourceFile,
+        getVirtualFile(resolveVirtualPath(sourceFile)) || "",
+      );
+    }
+
+    return false;
+  };
+
+  const createSandboxSession = (
+    name: string,
+    templateName: string,
+    capabilities: string[],
+    sourceFile: string,
+    yaml: string,
+  ): boolean => {
+    if (sandboxSessions.has(name)) {
+      printHtml(`<span style="color:#a8cfca;">${escapeHtml(capabilityRef("SandboxSession", name))} unchanged</span>`);
+      return true;
+    }
+    const template = sandboxTemplates.get(templateName);
+    if (!template) {
+      printEderaError(
+        `Error from server (NotFound): error when creating "${sourceFile}": sandboxtemplates.runtime.edera.dev "${templateName}" not found`,
+      );
+      return false;
+    }
+    const notGranted = capabilities.find((cap) => !template.capabilities.includes(cap));
+    if (notGranted) {
+      printEderaError(
+        `Error from server (Forbidden): error when creating "${sourceFile}": sandboxsessions.runtime.edera.dev "${name}" is forbidden: capability "${notGranted}" is not granted by template "${templateName}" (allowed: ${template.capabilities.join(", ")})`,
+      );
+      addEvent(
+        "Warning",
+        "CapabilityNotGranted",
+        `sandboxsession/${name}`,
+        `Template ${templateName} does not grant ${notGranted}`,
+      );
+      if (notGranted === "kubernetes-prod") markDemoStepComplete("session-denied");
+      return false;
+    }
+    const missing = capabilities.find((cap) => !clusterCapabilities.has(cap));
+    if (missing) {
+      printEderaError(
+        `Error from server (NotFound): error when creating "${sourceFile}": capabilities.runtime.edera.dev "${missing}" not found`,
+      );
+      return false;
+    }
+
+    sandboxSessions.set(name, {
+      template: templateName,
+      capabilities,
+      createdAt: Date.now(),
+      yaml,
+    });
+
+    const pod: LocalPod = {
+      name,
+      namespace: "default",
+      status: "Running",
+      age: "1s",
+      image: template.image,
+      ip: nextWorkloadPodIp(),
+      node: EDERA_SANDBOX_NODE,
+      labels: {
+        "runtime.edera.dev/session": name,
+        "runtime.edera.dev/template": templateName,
+      },
+      runtimeClassName: "edera",
+    };
+    pods.push(pod);
+    startEderaZoneForPod(pod);
+    const workload = protectWorkloads.find((item) => item.sourcePodName === name);
+    if (workload) workload.ocapConsumed = [...capabilities];
+
+    addEvent(
+      "Normal",
+      "SessionCreated",
+      `sandboxsession/${name}`,
+      `Created zone ${name} from template ${templateName}`,
+    );
+    for (const cap of capabilities) {
+      addEvent(
+        "Normal",
+        "OcapConsumed",
+        `workload/${name}`,
+        `Session ${name} consumes capability ${cap}`,
+      );
+    }
+    printHtml(`<span style="color:#b8ff3c;">${escapeHtml(capabilityRef("SandboxSession", name))} created</span>`);
+    if (name === SANDBOX_SESSION_NAME) markDemoStepComplete("session-apply");
+    return true;
+  };
+
+  const deleteCapabilityObject = (kind: CapabilityKind, name: string): boolean => {
+    const store =
+      kind === "Capability"
+        ? clusterCapabilities
+        : kind === "SandboxTemplate"
+          ? sandboxTemplates
+          : sandboxSessions;
+    if (!store.has(name)) return false;
+    store.delete(name);
+    if (kind === "SandboxSession") {
+      removeEderaPods((pod) => isSessionPod(pod, name));
+      if (name === SANDBOX_SESSION_NAME) markDemoStepComplete("session-cleanup");
+    }
+    addEvent("Normal", `${kind}Deleted`, `${kind.toLowerCase()}/${name}`, `${kind} ${name} deleted`);
+    printHtml(
+      `<span style="color:#b8ff3c;">${kind.toLowerCase()}.runtime.edera.dev "${escapeHtml(name)}" deleted</span>`,
+    );
+    return true;
+  };
+
+  const capabilityNames = (kind: CapabilityKind) =>
+    [
+      ...(kind === "Capability"
+        ? clusterCapabilities.keys()
+        : kind === "SandboxTemplate"
+          ? sandboxTemplates.keys()
+          : sandboxSessions.keys()),
+    ].sort();
+
+  const capabilityTable = (kind: CapabilityKind, names: string[]) => {
+    if (kind === "Capability") {
+      return formatTerminalTable(
+        ["NAME", "PHASE", "ACCEPTED", "READY", "POD", "AGE"],
+        names.map((name) => {
+          const users = sessionsUsing(name);
+          return [
+            { text: name, color: "#b8ff3c" },
+            users.length ? "Bound" : "Available",
+            "True",
+            "True",
+            users.join(",") || "",
+            ageSince(clusterCapabilities.get(name)!.createdAt),
+          ];
+        }),
+      );
+    }
+    if (kind === "SandboxTemplate") {
+      return formatTerminalTable(
+        ["NAME", "CAPABILITIES", "AGE"],
+        names.map((name) => {
+          const template = sandboxTemplates.get(name)!;
+          return [
+            { text: name, color: "#b8ff3c" },
+            template.capabilities.join(","),
+            ageSince(template.createdAt),
+          ];
+        }),
+      );
+    }
+    return formatTerminalTable(
+      ["NAME", "TEMPLATE", "CAPABILITIES", "READY", "AGE"],
+      names.map((name) => {
+        const session = sandboxSessions.get(name)!;
+        return [
+          { text: name, color: "#b8ff3c" },
+          session.template,
+          session.capabilities.join(","),
+          "True",
+          ageSince(session.createdAt),
+        ];
+      }),
+    );
+  };
+
+  const capabilityDescribe = (kind: CapabilityKind, name: string) => {
+    const lines = [
+      `Name:         ${name}`,
+      `Namespace:    default`,
+      `API Version:  runtime.edera.dev/v1alpha1`,
+      `Kind:         ${kind}`,
+    ];
+    if (kind === "Capability") {
+      const users = sessionsUsing(name);
+      lines.push(
+        `Spec:`,
+        `  Description:  ${clusterCapabilities.get(name)!.description}`,
+        `Status:`,
+        `  Accepted:   True`,
+        `  Ready:      True`,
+        `  Consumers:  ${users.join(", ") || "<none>"}`,
+      );
+    } else if (kind === "SandboxTemplate") {
+      const template = sandboxTemplates.get(name)!;
+      lines.push(
+        `Spec:`,
+        `  Capabilities:`,
+        ...template.capabilities.map((cap) => `    ${cap}`),
+        `  Pod Template:`,
+        `    Containers:`,
+        `      workload: ${template.image}`,
+      );
+    } else {
+      const session = sandboxSessions.get(name)!;
+      const zone = protectZones.find((item) => item.name === name && item.state === "ready");
+      lines.push(
+        `Spec:`,
+        `  Template Ref:  ${session.template}`,
+        `  Capabilities:`,
+        ...session.capabilities.map((cap) => `    ${cap}`),
+        `Status:`,
+        `  Zone:     ${zone ? `${zone.name} (${zone.uuid})` : "<none>"}`,
+        `  Node:     ${EDERA_SANDBOX_NODE}`,
+        `  Ready:    True`,
+      );
+    }
+    lines.push(`Events:       <none>`);
+    return lines.join("\n");
+  };
+
+  const handleCapabilityResources = (tokens: string[]): boolean => {
+    const verb = tokens[1];
+
+    // kubectl apply|delete -f examples/<file>.yaml
+    if ((verb === "apply" || verb === "delete") && tokens.includes("-f")) {
+      const files = tokens
+        .map((token, index) => (tokens[index - 1] === "-f" ? token : null))
+        .filter((token): token is string => token !== null);
+      const resolved = files.map((file) => {
+        const yaml = getVirtualFile(resolveVirtualPath(file.replace(/^['"]|['"]$/g, "")));
+        const docs = yaml ? parseRuntimeManifest(yaml) : [];
+        return { file, docs };
+      });
+      const ours = resolved.every(
+        ({ docs }) =>
+          docs.length > 0 &&
+          docs.every((doc) => ["Capability", "SandboxTemplate", "SandboxSession"].includes(doc.kind)),
+      );
+      if (resolved.length === 0 || !ours) return false;
+
+      for (const { file, docs } of resolved) {
+        for (const doc of docs) {
+          if (verb === "apply") {
+            applyCapabilityDoc(doc, file);
+          } else if (!deleteCapabilityObject(doc.kind as CapabilityKind, doc.name)) {
+            printEderaError(
+              `Error from server (NotFound): ${CAPABILITY_PLURALS[doc.kind as CapabilityKind]}.runtime.edera.dev "${doc.name}" not found`,
+            );
+          }
+        }
+      }
+      if (
+        verb === "apply" &&
+        ["github", "linear-search", "kubernetes-prod", "kubernetes-dev"].every((cap) =>
+          clusterCapabilities.has(cap),
+        )
+      ) {
+        markDemoStepComplete("capability-apply");
+      }
+      updateDashboard();
+      return true;
+    }
+
+    if (verb !== "get" && verb !== "describe" && verb !== "delete") return false;
+
+    const args = tokens.slice(2);
+    let resourceToken = args[0] || "";
+    const names: string[] = [];
+    let output = "";
+    for (let i = 1; i < args.length; i++) {
+      const token = args[i];
+      if (token === "-n" || token === "--namespace") i++;
+      else if (token === "-o" || token === "--output") output = args[++i] || "";
+      else if (token.startsWith("-o")) output = token.replace(/^-o=?/, "");
+      else if (token.startsWith("--output=")) output = token.split("=")[1] || "";
+      else if (!token.startsWith("-")) names.push(token);
+    }
+    if (resourceToken.includes("/")) {
+      names.push(resourceToken.split("/")[1]);
+      resourceToken = resourceToken.split("/")[0];
+    }
+
+    const parts = resourceToken.split(",").filter(Boolean);
+    const includePods = parts.some((part) => ["pod", "pods", "po"].includes(part.toLowerCase()));
+    const kindParts = parts.filter((part) => !["pod", "pods", "po"].includes(part.toLowerCase()));
+    if (kindParts.length === 0) return false;
+    const kinds = kindParts.map(resolveCapabilityKind);
+    if (kinds.some((kind) => kind === null)) return false;
+    if (includePods && verb !== "get") return false;
+    const resolvedKinds = kinds as CapabilityKind[];
+
+    if (verb === "delete") {
+      const deleteAll = tokens.includes("--all");
+      if (!names.length && !deleteAll) {
+        printEderaError("error: resource(s) were provided, but no name was specified");
+        return true;
+      }
+      for (const kind of resolvedKinds) {
+        const targets = deleteAll ? capabilityNames(kind) : names;
+        if (deleteAll && targets.length === 0) {
+          printHtml(`<span style="color:#a8cfca;">No resources found</span>`);
+        }
+        for (const name of targets) {
+          if (!deleteCapabilityObject(kind, name)) {
+            printEderaError(
+              `Error from server (NotFound): ${CAPABILITY_PLURALS[kind]}.runtime.edera.dev "${name}" not found`,
+            );
+          }
+        }
+      }
+      updateDashboard();
+      return true;
+    }
+
+    const sections: string[] = [];
+    const yamlDocs: string[] = [];
+    const describes: string[] = [];
+    for (const kind of resolvedKinds) {
+      const existing = capabilityNames(kind);
+      for (const name of names) {
+        if (!existing.includes(name) && resolvedKinds.length === 1) {
+          printEderaError(
+            `Error from server (NotFound): ${CAPABILITY_PLURALS[kind]}.runtime.edera.dev "${name}" not found`,
+          );
+          return true;
+        }
+      }
+      const selected = names.length ? existing.filter((name) => names.includes(name)) : existing;
+      if (selected.length === 0) continue;
+
+      if (verb === "describe") {
+        describes.push(...selected.map((name) => capabilityDescribe(kind, name)));
+      } else if (output === "yaml") {
+        for (const name of selected) {
+          if (kind === "Capability") {
+            const doc = CAPABILITY_MANIFEST_YAML.split(/^---\s*$/m).find((item) =>
+              new RegExp(`^\\s*name:\\s*${name}\\s*$`, "m").test(item),
+            );
+            if (doc) yamlDocs.push(doc.trim());
+          } else if (kind === "SandboxTemplate") {
+            yamlDocs.push(SANDBOX_TEMPLATE_YAML);
+          } else {
+            yamlDocs.push(sandboxSessions.get(name)!.yaml);
+          }
+        }
+      } else {
+        sections.push(capabilityTable(kind, selected));
+      }
+
+      if (kind === "Capability" && verb === "get" && selected.length >= 4) {
+        markDemoStepComplete("capability-list");
+      }
+      if (kind === "SandboxSession" && verb === "get" && selected.includes(SANDBOX_SESSION_NAME)) {
+        markDemoStepComplete("session-inspect");
+      }
+    }
+
+    if (includePods && verb === "get" && output !== "yaml") {
+      const related = pods.filter((pod) => isSessionPod(pod));
+      if (related.length) sections.push(ederaPodTable(related));
+    }
+
+    if (verb === "describe" && describes.length) {
+      printPre(escapeHtml(describes.join("\n\n\n")));
+    } else if (yamlDocs.length) {
+      printPre(escapeHtml(yamlDocs.join("\n---\n")));
+    } else if (sections.length) {
+      printPre(sections.join("\n\n"));
+    } else {
+      printHtml(`<span style="color:#a8cfca;">No resources found in default namespace.</span>`);
+    }
+    return true;
+  };
+
+  // `python3 examples/session.py`: what the SDK's context manager does.
+  const runSandboxSdk = async () => {
+    const templateName = SANDBOX_TEMPLATE_NAME;
+    const capabilities = ["kubernetes-dev", "github"];
+    const suffix = Math.random().toString(36).slice(2, 7);
+    const sessionName = `${templateName}-${suffix}`;
+    const generated = `apiVersion: runtime.edera.dev/v1alpha1
+kind: SandboxSession
+metadata:
+  generateName: ${templateName}-
+  name: ${sessionName}
+spec:
+  capabilities:
+${capabilities.map((cap) => `  - ${cap}`).join("\n")}
+  templateRef:
+    name: ${templateName}`;
+    const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+    printHtml(
+      `<span style="color:#00e5d4;"># SandboxSession(template="${templateName}", capabilities=${escapeHtml(
+        JSON.stringify(capabilities),
+      )}) →</span>`,
+    );
+    printPre(`<span style="color:#dff7f0;">${escapeHtml(generated)}</span>`);
+
+    const created = createSandboxSession(
+      sessionName,
+      templateName,
+      capabilities,
+      SANDBOX_SDK_PATH.slice(1),
+      generated,
+    );
+    updateDashboard();
+    if (!created) {
+      printHtml(`<span style="color:#ff7373;">Traceback (most recent call last):
+  File "examples/session.py", line 6, in &lt;module&gt;
+edera_runtime.SessionError: the SandboxSession was rejected (see above)</span>`);
+      return;
+    }
+
+    await wait(1200);
+    const zone = protectZones.find((item) => item.name === sessionName && item.state === "ready");
+    printHtml(
+      `<span style="color:#a8cfca;">zone ${escapeHtml(zone?.uuid || sessionName)} ready on ${EDERA_SANDBOX_NODE}</span>`,
+    );
+    printHtml(
+      `<span style="color:#b8ff3c;">[${escapeHtml(sessionName)}]</span> <span style="color:#dff7f0;">$ agent.py --repo my-repo</span>`,
+    );
+    printHtml(
+      `<span style="color:#a8cfca;">  capabilities: ${capabilities.join(", ")} · credentials: none in the sandbox · exit 0</span>`,
+    );
+    addEvent("Normal", "ExecInZone", `pod/${sessionName}`, "agent.py --repo my-repo");
+
+    await wait(2500);
+    deleteCapabilityObject("SandboxSession", sessionName);
+    printHtml(`<span style="color:#00e5d4;"># Leaving the with-block deleted the session and its zone.</span>`);
+    updateDashboard();
+    markDemoStepComplete("sdk-run");
+  };
+
   const handleKubectlCommand = async (
     rawCmd: string,
     tokens: string[],
@@ -6570,6 +7499,10 @@ Kernel isolation: enabled</span>`);
     // These are simulator-only resources layered on the existing Kubernetes
     // lab; the original pod/deployment/storage/Edera commands remain intact.
     // ---------------------------------------------------------------------
+    if (handleCapabilityResources(tokens)) {
+      return true;
+    }
+
     if (handleEderaRuntimeResources(tokens)) {
       return true;
     }
@@ -9714,6 +10647,19 @@ Kernel isolation: enabled</span>`);
               if (manifestPath.endsWith("/agent-sandbox/edera-fork.yaml")) {
                 markDemoStepComplete("edera-fork-manifest");
               }
+              if (
+                ["/rust/main.rs", "/python/main.py", "/typescript/main.ts"].includes(
+                  manifestPath,
+                )
+              ) {
+                markDemoStepComplete("readme-source");
+              }
+              if (manifestPath === SANDBOX_TEMPLATE_PATH) {
+                markDemoStepComplete("template-manifest");
+              }
+              if (manifestPath === SANDBOX_SDK_PATH) {
+                markDemoStepComplete("sdk-read");
+              }
             } else {
               printHtml(
                 `<span style="color:#ff7373;">cat: ${escapeHtml(
@@ -9725,6 +10671,64 @@ Kernel isolation: enabled</span>`);
 
           return;
         }
+        if (
+          (tokens[0] === "python3" || tokens[0] === "python") &&
+          tokens[1] &&
+          resolveVirtualPath(tokens[1]) === SANDBOX_SDK_PATH
+        ) {
+          await runSandboxSdk();
+          return;
+        }
+
+        // docker build -t <tag> <context> / docker push <tag> for the
+        // readme-fetch images. The build replays the context's Dockerfile.
+        if (tokens[0] === "docker" && tokens[1] === "build") {
+          let tag = "";
+          let context = "";
+          for (let i = 2; i < tokens.length; i++) {
+            if (tokens[i] === "-t" || tokens[i] === "--tag") tag = tokens[++i] || "";
+            else if (tokens[i].startsWith("--tag=")) tag = tokens[i].slice(6);
+            else if (!tokens[i].startsWith("-")) context = tokens[i];
+          }
+          const contextPath = resolveVirtualPath(context || ".");
+          const dockerfile = getVirtualFile(`${contextPath}/Dockerfile`);
+          if (!context || !dockerfile) {
+            printHtml(
+              `<span style="color:#ff7373;">ERROR: failed to solve: failed to read dockerfile: open Dockerfile: no such file or directory</span>`,
+            );
+            return;
+          }
+          const instructions = dockerfile
+            .split("\n")
+            .map((line) => line.trim())
+            .filter((line) => line && !line.startsWith("#"));
+          const steps = instructions
+            .map(
+              (line, index) =>
+                `<span style="color:#00e5d4;">#${index + 1}</span> <span style="color:#dff7f0;">[${index + 1}/${instructions.length}] ${escapeHtml(line)}</span>`,
+            )
+            .join("\n");
+          printPre(
+            `${steps}\n<span style="color:#b8ff3c;">naming to ${escapeHtml(
+              tag || "<none>",
+            )} done</span>`,
+          );
+          if (tag) {
+            cachedProtectImages.add(tag);
+            addEvent("Normal", "ImageBuilt", `image/${tag}`, `Built ${tag} from ${context}/Dockerfile`);
+            if (tag.startsWith(README_IMAGE_PREFIX)) markDemoStepComplete("readme-image-build");
+          }
+          return;
+        }
+
+        if (tokens[0] === "docker" && tokens[1] === "push" && tokens[2]) {
+          printHtml(
+            `<span style="color:#dff7f0;">The push refers to repository [${escapeHtml(tokens[2].split(":")[0])}]</span>`,
+          );
+          printHtml(`<span style="color:#b8ff3c;">${escapeHtml(tokens[2].split(":")[1] || "latest")}: digest: sha256:${Math.random().toString(16).slice(2, 14)}… pushed</span>`);
+          return;
+        }
+
         if (
           tokens[0] === "pip" &&
           tokens[1] === "install" &&

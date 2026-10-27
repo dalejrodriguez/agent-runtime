@@ -1,5 +1,47 @@
 import { BaseImage, Cluster, type ProcessContext } from "@ngrok/webernetes";
+import hljs from "highlight.js/lib/core";
+import rust from "highlight.js/lib/languages/rust";
+import python from "highlight.js/lib/languages/python";
+import typescript from "highlight.js/lib/languages/typescript";
+import yaml from "highlight.js/lib/languages/yaml";
+import ini from "highlight.js/lib/languages/ini";
+import dockerfile from "highlight.js/lib/languages/dockerfile";
+import json from "highlight.js/lib/languages/json";
 import "./style.css";
+
+// Syntax highlighting for `cat` in the terminal. Only the languages the lab's
+// files use are registered, to keep the bundle small.
+hljs.registerLanguage("rust", rust);
+hljs.registerLanguage("python", python);
+hljs.registerLanguage("typescript", typescript);
+hljs.registerLanguage("yaml", yaml);
+hljs.registerLanguage("ini", ini); // also covers TOML
+hljs.registerLanguage("dockerfile", dockerfile);
+hljs.registerLanguage("json", json);
+
+const HIGHLIGHT_LANGUAGES: Record<string, string> = {
+  rs: "rust",
+  py: "python",
+  ts: "typescript",
+  yaml: "yaml",
+  yml: "yaml",
+  toml: "ini",
+  json: "json",
+};
+
+// Returns HTML-escaped file content, highlighted when the file type is known.
+const highlightFile = (path: string, content: string): string => {
+  const base = path.split("/").pop() || "";
+  const language =
+    base === "Dockerfile" ? "dockerfile" : HIGHLIGHT_LANGUAGES[base.split(".").pop() || ""];
+  if (!language) {
+    return content
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;");
+  }
+  return `<span class="hljs">${hljs.highlight(content, { language }).value}</span>`;
+};
 
 class WebServerImage extends BaseImage {
   static readonly imageName = "web-server";
@@ -125,8 +167,6 @@ interface ProtectZone {
   targetCpus: number;
   device?: string;
   kernelVariant?: string;
-  // Object capabilities published by this zone (from --ocap-publish).
-  ocapPublished?: string[];
 }
 
 interface ProtectWorkload {
@@ -878,6 +918,11 @@ const OCAP_GITHUB_NAME = "github";
 const OCAP_ZONE_NAME = "kubecon-salt-lake";
 const OCAP_WORKLOAD_NAME = "agent";
 const OCAP_WORKLOAD_IMAGE = "docker.io/alpine/git:latest";
+// Capabilities are published by workloads (--ocap-publish is a workload
+// flag). In the agent walkthrough a relay workload publishes `github` into
+// the zone, and the agent consumes it.
+const OCAP_RELAY_NAME = "github-relay";
+const OCAP_RELAY_LAUNCH_COMMAND = `protect workload launch --zone ${OCAP_ZONE_NAME} --name ${OCAP_RELAY_NAME} --ocap-publish ${OCAP_GITHUB_NAME} ${OCAP_WORKLOAD_IMAGE}`;
 
 // A workload can publish a capability too (README "Demo Workflow"). The
 // readme-fetch provider idles in its own zone holding a GitHub token, and
@@ -894,7 +939,9 @@ const README_IMAGE_PREFIX = "ttl.sh/celery/readme-fetch-";
 const README_LANGUAGES = ["rust", "python", "typescript"] as const;
 type ReadmeLanguage = (typeof README_LANGUAGES)[number];
 const README_WORKLOAD_IMAGE = `${README_IMAGE_PREFIX}rust:1h`;
-const README_DIAL_REPO = "protect";
+// A public edera-dev repo. The fetchers hard-code the edera-dev org and accept
+// only [A-Za-z0-9]+, so names like agent-runtime can't be fetched.
+const README_DIAL_REPO = "styrolite";
 const README_WORKLOAD_LAUNCH_COMMAND =
   `protect workload launch -n ${README_WORKLOAD_NAME} -z ${README_ZONE_NAME} ` +
   `--mounts src=${README_TOKEN_HOST_PATH}:dst=${README_TOKEN_MOUNT_PATH}:ro=true ` +
@@ -1099,29 +1146,36 @@ const ALL_AGENT_SANDBOX_DEMO_STEPS: DemoStep[] = [
     id: "protect-zone-list-initial",
     title: "List Edera zones",
     description:
-      "Use the Protect CLI to list zones on this node. Nothing is running yet: a zone, and the capability it publishes, are created in the next steps.",
+      "Use the Protect CLI to list zones on this node. Nothing is running yet; the next steps create a zone.",
     command: "protect zone list",
   },
   {
     id: "ocap-definition",
     title: "Read the GitHub capability manifest",
     description:
-      "An object capability is explicit authority: the agent receives a thing it can use, and that thing grants a narrowly scoped operation. <code class='guide-code'>~/github.toml</code> describes one: git over HTTPS to GitHub, but only for the Kubernetes repository. GET is allowed for reads and POST for pushes; other repositories and endpoints are not granted.",
+      "An object capability is explicit authority: the agent receives a thing it can use, and that thing grants a narrowly scoped operation. <code class='guide-code'>~/github.toml</code> describes one: git over HTTPS to GitHub, but only for the Kubernetes repository. GET is allowed for reads and POST for pushes; other repositories and endpoints are not granted. The cluster-wide <code class='guide-code'>Capability</code> objects later in this lab take the same shape.",
     command: "cat github.toml",
   },
   {
     id: "protect-zone-launch",
-    title: "Launch a zone that publishes the capability",
+    title: "Launch a zone",
     description:
-      "Object capabilities are created with the zone. <code class='guide-code'>--ocap-publish</code> hands the manifest to the zone, which publishes <code class='guide-code'>github</code> for workloads inside it to consume. The credential stays with the publisher, outside the agent.",
-    command: `protect zone launch --name ${OCAP_ZONE_NAME} --ocap-publish github.toml`,
+      "A zone is the isolation boundary: its own kernel, memory and process space. Zones don't publish capabilities themselves; workloads running inside them do, with <code class='guide-code'>--ocap-publish</code>. You'll launch a workload that publishes one in a moment.",
+    command: `protect zone launch --name ${OCAP_ZONE_NAME}`,
   },
   {
     id: "protect-zone-list-ready",
     title: "Verify the zone is ready",
     description:
-      "List zones again and verify that the new zone has reached ready state, has been assigned network addresses and is publishing the <code class='guide-code'>github</code> capability.",
+      "List zones again and verify that the new zone has reached ready state and has been assigned network addresses.",
     command: "protect zone list",
+  },
+  {
+    id: "ocap-relay-launch",
+    title: "Publish the GitHub capability from a workload",
+    description:
+      `Start a relay workload in the zone that publishes <code class='guide-code'>github</code>. The credential stays with the relay; workloads that consume the capability never see it.`,
+    command: OCAP_RELAY_LAUNCH_COMMAND,
   },
   {
     id: "ocap-workload-help",
@@ -1176,7 +1230,7 @@ const ALL_AGENT_SANDBOX_DEMO_STEPS: DemoStep[] = [
     id: "protect-zone-destroy",
     title: "Destroy the zone",
     description:
-      "Tear down the zone. The capability it published goes with it, along with any workloads running inside. The --wait flag makes the lifecycle transition explicit in the terminal.",
+      "Tear down the zone, along with any workloads running inside it and the capabilities they published. The --wait flag makes the lifecycle transition explicit in the terminal.",
     command: `protect zone destroy ${OCAP_ZONE_NAME} --wait`,
   },
   {
@@ -1453,6 +1507,7 @@ const LAST_GUIDED_STEP_ID = "session-cleanup";
 // the terminal (and are listed in `help`); they just aren't walked through.
 const UNGUIDED_STEP_IDS = new Set([
   "protect-zone-list-ready",
+  "ocap-relay-launch",
   "ocap-workload-help",
   "ocap-workload-launch",
   "ocap-no-credentials",
@@ -2789,13 +2844,18 @@ const renderNodes = () => {
       .join("");
   };
   const renderCapability = () => {
-    // Capabilities only exist while a ready zone publishes them; destroying
-    // the zone removes them.
-    const publishingZone = protectZones.find(
-      (zone) =>
-        zone.state === "ready" &&
-        zone.ocapPublished?.includes(OCAP_GITHUB_NAME),
+    // Capabilities only exist while a running workload publishes them;
+    // destroying the workload (or its zone) removes them.
+    const githubPublisher = protectWorkloads.find(
+      (workload) =>
+        workload.state === "running" &&
+        workload.ocapPublished?.includes(OCAP_GITHUB_NAME),
     );
+    const publishingZone = githubPublisher
+      ? protectZones.find(
+          (zone) => zone.uuid === githubPublisher.zone && zone.state === "ready",
+        )
+      : undefined;
 
     // Workload-published readme capability (README "Demo Workflow").
     const readmeProvider = protectWorkloads.find(
@@ -3405,7 +3465,6 @@ const renderNodes = () => {
     targetCpus = 2,
     device?: string,
     kernelVariant?: string,
-    ocapPublished: string[] = [],
   ) => {
     const uuid = crypto.randomUUID();
     const zone: ProtectZone = {
@@ -3419,7 +3478,6 @@ const renderNodes = () => {
       targetCpus,
       device,
       kernelVariant,
-      ocapPublished: ocapPublished.length > 0 ? ocapPublished : undefined,
     };
     protectZones.push(zone);
     addEvent(
@@ -3437,14 +3495,6 @@ const renderNodes = () => {
       `zone/${name}`,
       `Edera zone ${name} is ready`,
     );
-    for (const capability of ocapPublished) {
-      addEvent(
-        "Normal",
-        "OcapPublished",
-        `zone/${name}`,
-        `Zone ${name} published object capability ${capability}`,
-      );
-    }
     syncEderaPodsToProtectWorkloads();
     updateDashboard();
     printHtml(
@@ -3464,21 +3514,18 @@ const renderNodes = () => {
     const stateWidth = 13;
     const ipv4Width = 18;
     const ipv6Width = 28;
-    // Only show the OCAPS column once a zone publishes object capabilities.
-    const showOcaps = zones.some((zone) => zone.ocapPublished?.length);
     const header =
       "NAME".padEnd(nameWidth) +
       "UUID".padEnd(uuidWidth) +
       "STATE".padEnd(stateWidth) +
       "IPV4".padEnd(ipv4Width) +
-      (showOcaps ? "IPV6".padEnd(ipv6Width) + "OCAPS" : "IPV6");
+      "IPV6";
     const divider =
       "─".repeat(nameWidth) +
       "─".repeat(uuidWidth) +
       "─".repeat(stateWidth) +
       "─".repeat(ipv4Width) +
-      "─".repeat(ipv6Width) +
-      (showOcaps ? "─".repeat(10) : "");
+      "─".repeat(ipv6Width);
 
     let html = `<span style="color:#00e5d4;font-weight:700;">${header}</span>\n`;
     html += `<span style="color:#08736d;">${divider}</span>\n`;
@@ -3498,12 +3545,7 @@ const renderNodes = () => {
           zone.state.padEnd(stateWidth),
         )}</span>` +
         `${escapeHtml((zone.ipv4 || "").padEnd(ipv4Width))}` +
-        (showOcaps
-          ? `${escapeHtml((zone.ipv6 || "").padEnd(ipv6Width))}` +
-            `<span style="color:#b8ff3c;">${escapeHtml(
-              zone.state === "destroyed" ? "" : zone.ocapPublished?.join(",") || "",
-            )}</span>`
-          : `${escapeHtml(zone.ipv6 || "")}`) +
+        `${escapeHtml(zone.ipv6 || "")}` +
         "\n";
     }
 
@@ -3759,9 +3801,8 @@ const renderNodes = () => {
       return;
     }
 
-    // NAME[=PROVIDER]: a consumed capability must be provided inside this
-    // zone, either by the zone itself (--ocap-publish on zone launch) or by
-    // another workload running in it.
+    // NAME[=PROVIDER]: a consumed capability must be published by another
+    // workload running in this zone (--ocap-publish on workload launch).
     const ocapConsumed: string[] = [];
     for (const entry of ocapConsume) {
       const [capabilityName, provider] = entry.split("=");
@@ -3772,7 +3813,6 @@ const renderNodes = () => {
         return;
       }
       const available = new Set([
-        ...(zone.ocapPublished || []),
         ...protectWorkloads
           .filter((item) => item.zone === zone.uuid && item.state === "running")
           .flatMap((item) => item.ocapPublished || []),
@@ -4270,25 +4310,30 @@ const renderNodes = () => {
     return false;
   };
 
-  // edera-dev/protect is private, so the browser can't fetch its README
-  // without the token the real provider holds. Public repositories are
-  // fetched live; this excerpt stands in for the private one.
-  const README_FALLBACKS: Record<string, string> = {
-    protect: `# Edera Protect
+  // Public READMEs are fetched live, exactly as the fetchers do. These
+  // snapshots of the real files are used only when the browser is offline
+  // (e.g. flaky booth wifi). Private repos can't be read from the browser:
+  // the real provider would use its token, but the simulator has none.
+  const README_OFFLINE_SNAPSHOTS: Record<string, string> = {
+    styrolite: `<p align="center">
 
-Edera Protect runs containers and Kubernetes pods inside isolated zones.
-Each zone is a lightweight virtual machine with its own kernel, so a
-compromised workload never shares the host kernel with its neighbours.
+<img src="assets/logo.png" alt="styrolite logo" width="200" height="200" />
+<h1 align="center">styrolite</h1>
 
-## Components
+</p>
 
-- protect-daemon: manages zones and workloads on a node
-- protect: the CLI for zones, workloads, images and object capabilities
-- Edera runtime: the Kubernetes RuntimeClass that schedules pods into zones
+Styrolite provides a programmable sandboxing tool for workloads.
 
-## Getting started
+Styrolite is used as the workload lifecycle manager in Edera Protect,
+leveraging Linux kernel namespaces to provide lightweight sandboxes for
+workloads to run in, and is designed to provide low-level primitives
+suitable for implementing a CRI.
 
-See https://docs.edera.dev for installation and usage.
+Styrolite is named after the [substance used in Star Trek][st] used to
+provide physical redundancy for scenarios where a medical quarantine
+field could fail.
+
+   [st]: https://memory-alpha.fandom.com/wiki/Styrolite
 `,
   };
 
@@ -4391,10 +4436,12 @@ See https://docs.edera.dev for installation and usage.
 
     const url = `https://raw.githubusercontent.com/edera-dev/${repo}/main/README.md`;
     let body: string | undefined;
+    let reachedGitHub = false;
     let status = 404;
     let statusText = "Not Found";
     try {
       const response = await fetch(url);
+      reachedGitHub = true;
       if (response.ok) {
         body = await response.text();
       } else {
@@ -4402,9 +4449,9 @@ See https://docs.edera.dev for installation and usage.
         statusText = response.statusText || statusText;
       }
     } catch {
-      // Offline or blocked: fall through to the bundled excerpt, if any.
+      // Offline or blocked: fall back to a bundled snapshot, if any.
     }
-    body ??= README_FALLBACKS[repo];
+    if (!reachedGitHub) body ??= README_OFFLINE_SNAPSHOTS[repo];
 
     lastReadmeRepo = repo;
     if (body === undefined) {
@@ -4414,6 +4461,11 @@ See https://docs.edera.dev for installation and usage.
           readmeFetchError(language, "http", url, status, statusText),
         )}</span>`,
       );
+      if (status === 404) {
+        printHtml(
+          `<span style="color:#a8cfca;"># edera-dev/${escapeHtml(repo)} doesn't exist or is private. A real provider would read private repos with its token; this browser simulator has no token, so try a public repo such as ${README_DIAL_REPO}.</span>`,
+        );
+      }
       updateDashboard();
       return;
     }
@@ -4818,8 +4870,13 @@ See https://docs.edera.dev for installation and usage.
           </div>
 
           <div class="cli-help-command">
-            <code>protect zone launch --name ${OCAP_ZONE_NAME} --ocap-publish github.toml</code>
-            <span>Create a zone that publishes the GitHub capability.</span>
+            <code>protect zone launch --name ${OCAP_ZONE_NAME}</code>
+            <span>Create the zone the agent will run in.</span>
+          </div>
+
+          <div class="cli-help-command">
+            <code>${escapeHtml(OCAP_RELAY_LAUNCH_COMMAND)}</code>
+            <span>Publish the GitHub capability from a relay workload in the zone.</span>
           </div>
 
           <div class="cli-help-command">
@@ -5196,8 +5253,8 @@ Options:
           Zone to launch the workload in, by name or UUID
   -n, --name <NAME>
           Name of the workload
-      --mounts <MOUNTS>
-          Host path to mount into the workload as src=HOST_PATH:dst=PATH[:ro=true] (repeatable)
+  -m, --mounts <MOUNTS>
+          Mount host directories into the workload, as src=HOST_PATH:dst=PATH[:ro=true] (repeatable)
       --ocap-consume <OCAP_CONSUME>
           Object capability to consume as NAME[=PROVIDER] (repeatable). NAME may be a capability type implemented by several providers; PROVIDER pins one implementation instead of taking the highest-priority one, e.g. 'dev.edera/bar=dev.edera/foo'
       --ocap-publish <OCAP_PUBLISH>
@@ -5262,10 +5319,6 @@ Options:
             <span>Filter matches using the <code style="color:#b8ff3c;">status.state</code> field.</span>
           </div>
 
-          <div class="cli-help-command">
-            <code>protect zone launch --name &lt;name&gt; --ocap-publish &lt;MANIFEST&gt;</code>
-            <span>Create a zone that publishes the object capability described by a manifest (repeatable).</span>
-          </div>
         </div>
 
         <div class="cli-help-section">
@@ -5278,7 +5331,7 @@ Options:
 
           <div class="cli-help-command">
             <code>--ocap-consume / --ocap-publish / --ocap-implements</code>
-            <span>Consume or provide object capabilities. See <code style="color:#b8ff3c;">protect workload launch -h</code>.</span>
+            <span>Consume or publish object capabilities (capabilities are published by workloads, not zones). See <code style="color:#b8ff3c;">protect workload launch -h</code>.</span>
           </div>
 
           <div class="cli-help-command">
@@ -5395,7 +5448,6 @@ Options:
         ipv4: zone.ipv4,
         ipv6: zone.ipv6,
         ...(zone.kernelVariant ? { kernelVariant: zone.kernelVariant } : {}),
-        ...(zone.ocapPublished?.length ? { ocapPublish: zone.ocapPublished } : {}),
       })),
     };
     printPre(escapeHtml(JSON.stringify(payload, null, pretty ? 2 : 0)));
@@ -5715,15 +5767,20 @@ Options:
         let targetCpus = 2;
         let device = "";
         let kernelVariant = "";
-        const ocapManifests: string[] = [];
 
         for (let i = 3; i < tokens.length; i++) {
           const token = tokens[i];
 
-          if (token === "--ocap-publish") {
-            ocapManifests.push(tokens[++i] || "");
-          } else if (token.startsWith("--ocap-publish=")) {
-            ocapManifests.push(token.slice("--ocap-publish=".length));
+          if (token === "--ocap-publish" || token.startsWith("--ocap-publish=")) {
+            // Capabilities are published by workloads, not zones.
+            printPre(
+              `<span style="color:#ff7373;">error: unexpected argument '--ocap-publish' found</span>\n\n` +
+                `<span style="color:#dff7f0;">Usage: protect zone launch [OPTIONS] --name &lt;NAME&gt;\n\nFor more information, try '--help'.</span>`,
+            );
+            printHtml(
+              `<span style="color:#a8cfca;"># --ocap-publish is a workload flag: protect workload launch --zone &lt;zone&gt; --name &lt;name&gt; --ocap-publish NAME[=COMMAND ARGS] &lt;image&gt;</span>`,
+            );
+            return true;
           } else if (token === "-W" || token === "--wait") {
             // Launch completes synchronously in the simulator.
           } else if (token === "-n" || token === "--name") {
@@ -5788,39 +5845,6 @@ Options:
           }
         }
 
-        // Each --ocap-publish names a capability manifest; the zone publishes
-        // the capability declared by that manifest's `name`.
-        const ocapPublished: string[] = [];
-        for (const manifestArg of ocapManifests) {
-          if (!manifestArg) {
-            printHtml(
-              `<span style="color:#ff7373;">Error: --ocap-publish requires a capability manifest, e.g. --ocap-publish github.toml</span>`,
-            );
-            return true;
-          }
-          const manifest = getVirtualFile(resolveVirtualPath(manifestArg));
-          if (manifest === undefined) {
-            printHtml(
-              `<span style="color:#ff7373;">Error: capability manifest "${escapeHtml(
-                manifestArg,
-              )}" not found.</span>`,
-            );
-            return true;
-          }
-          const capabilityName = manifest.match(/^\s*name\s*=\s*"([^"]+)"/m)?.[1];
-          if (!capabilityName) {
-            printHtml(
-              `<span style="color:#ff7373;">Error: capability manifest "${escapeHtml(
-                manifestArg,
-              )}" does not declare a name.</span>`,
-            );
-            return true;
-          }
-          if (!ocapPublished.includes(capabilityName)) {
-            ocapPublished.push(capabilityName);
-          }
-        }
-
         if (
           protectZones.some(
             (zone) => zone.name === name && zone.state !== "destroyed",
@@ -5839,15 +5863,10 @@ Options:
           targetCpus,
           device || undefined,
           kernelVariant || undefined,
-          ocapPublished,
         );
 
         markDemoStepComplete("zone-launch");
-        if (
-          activeDemoMode === "agent-sandbox" &&
-          name === OCAP_ZONE_NAME &&
-          ocapPublished.includes(OCAP_GITHUB_NAME)
-        ) {
+        if (activeDemoMode === "agent-sandbox" && name === OCAP_ZONE_NAME) {
           markDemoStepComplete("protect-zone-launch");
         }
         if (name === README_ZONE_NAME) {
@@ -5984,6 +6003,7 @@ Options:
           "--ocap-publish": (value) => ocapPublish.push(value),
           "--ocap-implements": (value) => ocapImplements.push(value),
           "--mounts": (value) => mountSpecs.push(value),
+          "-m": (value) => mountSpecs.push(value),
         };
 
         for (let i = 3; i < tokens.length; i++) {
@@ -6094,6 +6114,10 @@ Options:
 
         if (!launched) {
           return true;
+        }
+
+        if (launched.ocapPublished?.includes(OCAP_GITHUB_NAME)) {
+          markDemoStepComplete("ocap-relay-launch");
         }
 
         if (
@@ -10637,7 +10661,7 @@ edera_runtime.SessionError: the SandboxSession was rejected (see above)</span>`)
             const manifest = getVirtualFile(manifestPath);
 
             if (manifest) {
-              printPre(escapeHtml(manifest));
+              printPre(highlightFile(manifestPath, manifest));
               if (manifestPath === OCAP_GITHUB_MANIFEST_PATH) {
                 markDemoStepComplete("ocap-definition");
               }

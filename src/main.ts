@@ -1,3 +1,4 @@
+/// <reference types="vite/client" />
 import { BaseImage, Cluster, type ProcessContext } from "@ngrok/webernetes";
 import hljs from "highlight.js/lib/core";
 import rust from "highlight.js/lib/languages/rust";
@@ -974,7 +975,14 @@ const README_FETCH_SOURCES: Record<string, string> = Object.fromEntries(
 // picks a subset of them; a SandboxSession picks a subset of its template's
 // and the controller creates a zone + workload that consumes exactly those.
 // ---------------------------------------------------------------------------
+// examples/capability.yaml is the real Capability from edera-runtime: a
+// provider pod (the readme-fetch image, with its token from a Secret) that
+// publishes dev.example/readme. examples/capabilities.yaml adds the other
+// capabilities the SandboxTemplate below refers to.
 const CAPABILITY_MANIFEST_PATH = "/examples/capability.yaml";
+const CAPABILITY_SET_PATH = "/examples/capabilities.yaml";
+const CAPABILITY_SECRET_NAME = "readme-token";
+const CAPABILITY_SECRET_COMMAND = `kubectl create secret generic ${CAPABILITY_SECRET_NAME} --from-file=token=/tmp/token`;
 const SANDBOX_TEMPLATE_PATH = "/examples/sandbox-template.yaml";
 const SANDBOX_SESSION_PATH = "/examples/sandbox-session.yaml";
 const SANDBOX_SESSION_PROD_PATH = "/examples/sandbox-session-prod.yaml";
@@ -987,20 +995,27 @@ kind: Capability
 metadata:
   name: github
 spec:
-  description: git over HTTPS to github.com, for the repositories granted below
-  http:
-    endpoint: https://github.com
-    rules:
-    - method: GET
-      path: /kubernetes/kubernetes.git
-    - method: POST
-      path: /kubernetes/kubernetes.git
-  auth:
-    scheme: basic
-    secretRef:
-      name: github-token
----
-apiVersion: runtime.edera.dev/v1alpha1
+  capabilities:
+    - name: dev.example/readme
+      command: ['/readme-fetch', 'get']
+  spec:
+    containers:
+    - name: readme
+      image: ttl.sh/celery/readme-fetch-rust:1h
+      volumeMounts:
+        - name: token
+          mountPath: /run/secrets/token
+          subPath: token
+          readOnly: true
+    volumes:
+    - name: token
+      secret:
+        secretName: readme-token
+        items:
+          - key: token
+            path: token`;
+
+const CAPABILITY_SET_YAML = `apiVersion: runtime.edera.dev/v1alpha1
 kind: Capability
 metadata:
   name: linear-search
@@ -1100,12 +1115,45 @@ interface RuntimeManifestDoc {
   capabilities: string[];
   templateRef?: string;
   image?: string;
+  // Capability only: the provider pod and what it publishes.
+  provider?: CapabilityProviderSpec;
 }
+
+interface CapabilityProviderSpec {
+  // spec.capabilities[]: object capability name -> command it runs.
+  publishes: Record<string, string[]>;
+  container: string;
+  image: string;
+  mountPath?: string;
+  readOnly: boolean;
+  secretName?: string;
+}
+
+// Capability.spec: `capabilities: [{name, command}]` plus a pod `spec`.
+const parseCapabilityProvider = (doc: string): CapabilityProviderSpec | undefined => {
+  if (!/^\s+spec:\s*\n\s+containers:/m.test(doc)) return undefined;
+  const publishes: Record<string, string[]> = {};
+  for (const match of doc.matchAll(/-\s*name:\s*(\S+)\s*\n\s*command:\s*\[([^\]]*)\]/g)) {
+    publishes[match[1]] = match[2]
+      .split(",")
+      .map((word) => word.trim().replace(/^['"]|['"]$/g, ""))
+      .filter(Boolean);
+  }
+  return {
+    publishes,
+    container: doc.match(/containers:\s*\n\s*-\s*name:\s*(\S+)/)?.[1] || "workload",
+    image: doc.match(/image:\s*(\S+)/)?.[1] || "",
+    mountPath: doc.match(/mountPath:\s*(\S+)/)?.[1],
+    readOnly: /readOnly:\s*true/.test(doc),
+    secretName: doc.match(/secretName:\s*(\S+)/)?.[1],
+  };
+};
 
 const parseRuntimeManifest = (yaml: string): RuntimeManifestDoc[] =>
   yaml
     .split(/^---\s*$/m)
     .map((doc) => {
+      const kind = doc.match(/^kind:\s*(\S+)/m)?.[1] || "";
       const capabilities: string[] = [];
       const capabilitiesBlock = doc.match(/^\s*capabilities:\s*\n((?:\s*-\s*\S+\s*\n?)+)/m);
       if (capabilitiesBlock) {
@@ -1115,9 +1163,12 @@ const parseRuntimeManifest = (yaml: string): RuntimeManifestDoc[] =>
         }
       }
       return {
-        kind: doc.match(/^kind:\s*(\S+)/m)?.[1] || "",
+        kind,
         name: doc.match(/^metadata:\s*\n\s+name:\s*(\S+)/m)?.[1] || "",
-        capabilities,
+        // A Capability's spec.capabilities lists what its provider publishes,
+        // not references to other capabilities.
+        capabilities: kind === "Capability" ? [] : capabilities,
+        provider: kind === "Capability" ? parseCapabilityProvider(doc) : undefined,
         templateRef: doc.match(/templateRef:\s*\n\s+name:\s*(\S+)/)?.[1],
         image: doc.match(/image:\s*(\S+)/)?.[1],
       };
@@ -1306,18 +1357,53 @@ const ALL_AGENT_SANDBOX_DEMO_STEPS: DemoStep[] = [
       "kubectl get crd capabilities.runtime.edera.dev sandboxtemplates.runtime.edera.dev sandboxsessions.runtime.edera.dev",
   },
   {
-    id: "capability-apply",
-    title: "Create the cluster capabilities",
+    id: "capability-secret",
+    title: "Store the provider's token in a Secret",
     description:
-      "<code class='guide-code'>examples/capability.yaml</code> declares four capabilities: <code class='guide-code'>github</code>, <code class='guide-code'>linear-search</code>, <code class='guide-code'>kubernetes-prod</code> and <code class='guide-code'>kubernetes-dev</code>. Each names an endpoint, the requests it allows, and the Secret holding its credential.",
+      `On Kubernetes, the provider's GitHub token comes from a Secret instead of a host file. Create <code class='guide-code'>${CAPABILITY_SECRET_NAME}</code> from the token staged at <code class='guide-code'>/tmp/token</code>.`,
+    command: CAPABILITY_SECRET_COMMAND,
+  },
+  {
+    id: "capability-manifest",
+    title: "Read the Capability",
+    description:
+      "This is the same README fetcher as a Kubernetes object. <code class='guide-code'>spec.capabilities</code> lists what it publishes: <code class='guide-code'>dev.example/readme</code>, running <code class='guide-code'>/readme-fetch get</code>. The inner <code class='guide-code'>spec</code> is the provider's pod, with the Secret mounted read-only at <code class='guide-code'>/run/secrets/token</code>.",
+    command: "cat examples/capability.yaml",
+  },
+  {
+    id: "capability-apply",
+    title: "Create the Capability",
+    description:
+      "Apply it. The controller accepts the Capability and starts its provider pod in an Edera zone.",
     command: "kubectl apply -f examples/capability.yaml",
   },
   {
     id: "capability-list",
     title: "List the capabilities",
     description:
-      "Every capability exists in the cluster, but nothing consumes one yet. Its credential stays in a Secret the OCAP proxy reads; no sandbox ever receives it.",
+      "<code class='guide-code'>github</code> is accepted, and <code class='guide-code'>POD</code> names the provider the controller created for it.",
     command: "kubectl get capability",
+  },
+  {
+    id: "capability-pod",
+    title: "Inspect the provider pod",
+    description:
+      "The provider runs with the <code class='guide-code'>edera</code> runtime class, so it gets its own zone. The <code class='guide-code'>dev.edera/ocap-publish</code> annotation is how the pod publishes <code class='guide-code'>dev.example/readme</code>, the Kubernetes equivalent of <code class='guide-code'>--ocap-publish</code>.",
+    command: "kubectl describe po edera-capability-github | head -n 10",
+  },
+  {
+    id: "capability-dial",
+    title: "Dial the capability",
+    description:
+      "Call it exactly as before. This time the provider is the pod the controller created, reading <code class='guide-code'>edera-dev/protect</code> (a private repo) with the token from the Secret. The caller only sees the README.",
+    command: `protect object-capability dial ${README_CAPABILITY} protect | head -n 5`,
+  },
+  {
+    id: "capability-set-apply",
+    title: "Add more capabilities",
+    description:
+      "<code class='guide-code'>examples/capabilities.yaml</code> declares three more: <code class='guide-code'>linear-search</code>, <code class='guide-code'>kubernetes-prod</code> and <code class='guide-code'>kubernetes-dev</code>. Next, a template picks a subset of these four.",
+    command: "kubectl apply -f examples/capabilities.yaml",
   },
   {
     id: "template-manifest",
@@ -1900,6 +1986,7 @@ async function initTerminalDemo() {
     ...README_FETCH_SOURCES,
 
     [CAPABILITY_MANIFEST_PATH]: CAPABILITY_MANIFEST_YAML,
+    [CAPABILITY_SET_PATH]: CAPABILITY_SET_YAML,
     [SANDBOX_TEMPLATE_PATH]: SANDBOX_TEMPLATE_YAML,
     [SANDBOX_SESSION_PATH]: SANDBOX_SESSION_YAML,
     [SANDBOX_SESSION_PROD_PATH]: SANDBOX_SESSION_PROD_YAML,
@@ -2478,6 +2565,53 @@ vfio_pci`;
     output.scrollTop = output.scrollHeight;
   };
 
+  // `<command> | head -n N` (or `| head -N`, `| head`): the only pipe the
+  // terminal supports. Returns the command without the pipe.
+  const parseHeadPipe = (
+    command: string,
+  ): { command: string; lines: number } | null => {
+    const match = command.match(/^(.+?)\s*\|\s*head(?:\s+(?:-n\s*)?-?(\d+))?\s*$/);
+    if (!match) return null;
+    return { command: match[1].trim(), lines: match[2] ? Number(match[2]) : 10 };
+  };
+
+  // Keep the first `limit` lines across the given output blocks, the way
+  // `head` would. A block without <pre> is one line; <pre> blocks are cut at
+  // their newlines. Everything after the limit is removed.
+  const limitOutputLines = (blocks: Element[], limit: number) => {
+    let remaining = limit;
+    for (const block of blocks) {
+      if (remaining <= 0) {
+        block.remove();
+        continue;
+      }
+      if (!block.querySelector("pre")) {
+        remaining -= 1;
+        continue;
+      }
+      const walker = document.createTreeWalker(block, NodeFilter.SHOW_TEXT);
+      let endsWithNewline = false;
+      for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+        const text = node.textContent || "";
+        if (remaining <= 0) {
+          node.textContent = "";
+          continue;
+        }
+        let cut = -1;
+        for (let i = 0; i < text.length; i++) {
+          if (text[i] === "\n" && --remaining === 0) {
+            cut = i;
+            break;
+          }
+        }
+        if (cut >= 0) node.textContent = text.slice(0, cut);
+        if (text.length) endsWithNewline = text.endsWith("\n");
+      }
+      // A final line without a trailing newline still counts.
+      if (remaining > 0 && !endsWithNewline) remaining -= 1;
+    }
+  };
+
   const printPre = (htmlContent: string) => {
     printHtml(`<pre class="terminal-pre">${htmlContent}</pre>`);
   };
@@ -2999,7 +3133,7 @@ const renderNodes = () => {
       >
         <div style="display:flex;align-items:baseline;gap:10px;margin-bottom:6px;">
           <div style="font-size:14px;font-weight:800;color:#102f2c;">Cluster capabilities</div>
-          <span style="font-size:11px;color:#4b6864;">capabilities.runtime.edera.dev · credentials stay with the OCAP proxy</span>
+          <span style="font-size:11px;color:#4b6864;">capabilities.runtime.edera.dev · credentials stay with each provider</span>
         </div>
         ${rows}
       </div>
@@ -4318,6 +4452,17 @@ const renderNodes = () => {
   // snapshots of the real files are used only when the browser is offline
   // (e.g. flaky booth wifi). Private repos can't be read from the browser:
   // the real provider would use its token, but the simulator has none.
+  // The opening of private READMEs, from real dial output, so the demo can
+  // show `dial dev.example/readme protect | head -n 5` as it really looks.
+  const README_PRIVATE_PREVIEWS: Record<string, string> = {
+    protect: `# Edera Protect Monorepo
+
+Protect computing workloads with advanced isolation technology.
+
+### Documentation
+`,
+  };
+
   const README_OFFLINE_SNAPSHOTS: Record<string, string> = {
     styrolite: `<p align="center">
 
@@ -4456,6 +4601,10 @@ field could fail.
       // Offline or blocked: fall back to a bundled snapshot, if any.
     }
     if (!reachedGitHub) body ??= README_OFFLINE_SNAPSHOTS[repo];
+    // Private repos: only the opening lines are bundled (see
+    // README_PRIVATE_PREVIEWS), since the browser has no token.
+    const privatePreview = body === undefined ? README_PRIVATE_PREVIEWS[repo] : undefined;
+    if (privatePreview) body = privatePreview;
 
     lastReadmeRepo = repo;
     if (body === undefined) {
@@ -4483,12 +4632,21 @@ field could fail.
         `<span style="color:#a8cfca;">… ${lines.length - MAX_LINES} more lines</span>`,
       );
     }
+    if (privatePreview) {
+      printHtml(
+        `<span style="color:#a8cfca;">… edera-dev/${escapeHtml(repo)} is private: the simulator bundles only its opening lines. A real provider reads the whole file with its token.</span>`,
+      );
+    }
     printHtml(
       `<span style="color:#00e5d4;"># Fetched by ${escapeHtml(provider.name)} (${language}). The GitHub token stayed in the provider; the caller only received the README.</span>`,
     );
     lastReadmeAction = "allowed";
     updateDashboard();
-    markDemoStepComplete("readme-dial");
+    if (isCapabilityProviderPod(provider.name)) {
+      markDemoStepComplete("capability-dial");
+    } else {
+      markDemoStepComplete("readme-dial");
+    }
   };
 
   const execProtectWorkload = (
@@ -4923,13 +5081,33 @@ field could fail.
           <div class="cli-help-section-title">Capabilities, Templates and Sessions</div>
 
           <div class="cli-help-command">
+            <code>${escapeHtml(CAPABILITY_SECRET_COMMAND)}</code>
+            <span>Store the README provider's GitHub token in a Secret.</span>
+          </div>
+
+          <div class="cli-help-command">
             <code>kubectl apply -f examples/capability.yaml</code>
-            <span>Create the cluster's Capability objects.</span>
+            <span>Create the github Capability; its provider pod publishes ${README_CAPABILITY}.</span>
+          </div>
+
+          <div class="cli-help-command">
+            <code>kubectl apply -f examples/capabilities.yaml</code>
+            <span>Add linear-search, kubernetes-prod and kubernetes-dev.</span>
           </div>
 
           <div class="cli-help-command">
             <code>kubectl get capability</code>
-            <span>List capabilities and the sessions bound to them.</span>
+            <span>List capabilities and their provider pods.</span>
+          </div>
+
+          <div class="cli-help-command">
+            <code>kubectl describe po edera-capability-github</code>
+            <span>Inspect the provider pod and its dev.edera/ocap-publish annotation.</span>
+          </div>
+
+          <div class="cli-help-command">
+            <code>&lt;command&gt; | head -n &lt;N&gt;</code>
+            <span>Show only the first N lines of a command's output.</span>
           </div>
 
           <div class="cli-help-command">
@@ -6990,6 +7168,9 @@ Kernel isolation: enabled</span>`);
   interface ClusterCapabilityState {
     createdAt: number;
     description: string;
+    // Set for Capabilities that run a provider pod (spec.spec).
+    provider?: CapabilityProviderSpec;
+    podName?: string;
   }
   interface SandboxTemplateState {
     capabilities: string[];
@@ -7004,6 +7185,8 @@ Kernel isolation: enabled</span>`);
   }
 
   const clusterCapabilities = new Map<string, ClusterCapabilityState>();
+  // Secrets created with `kubectl create secret generic` (name -> keys).
+  const clusterSecrets = new Map<string, { keys: string[]; createdAt: number }>();
   const sandboxTemplates = new Map<string, SandboxTemplateState>();
   const sandboxSessions = new Map<string, SandboxSessionState>();
 
@@ -7014,7 +7197,7 @@ Kernel isolation: enabled</span>`);
   };
 
   const capabilityDescriptions = Object.fromEntries(
-    CAPABILITY_MANIFEST_YAML.split(/^---\s*$/m).map((doc) => [
+    `${CAPABILITY_MANIFEST_YAML}\n---\n${CAPABILITY_SET_YAML}`.split(/^---\s*$/m).map((doc) => [
       doc.match(/^metadata:\s*\n\s+name:\s*(\S+)/m)?.[1] || "",
       doc.match(/description:\s*(.+)$/m)?.[1] || "",
     ]),
@@ -7049,6 +7232,145 @@ Kernel isolation: enabled</span>`);
       .filter(([, session]) => session.capabilities.includes(capability))
       .map(([name]) => name);
 
+  const capabilityPodName = (capability: string) => `edera-capability-${capability}`;
+
+  const capabilityPublishAnnotation = (provider: CapabilityProviderSpec) =>
+    Object.entries(provider.publishes)
+      .map(([name, command]) => `${name}=${JSON.stringify(command)}`)
+      .join(",");
+
+  // The controller runs a Capability's pod spec as an Edera pod. Once it's
+  // running, its workload publishes spec.capabilities as object capabilities.
+  const createCapabilityProviderPod = (capability: string, state: ClusterCapabilityState) => {
+    const provider = state.provider!;
+    const name = capabilityPodName(capability);
+    state.podName = name;
+    pods.push({
+      name,
+      namespace: "default",
+      status: "ContainerCreating",
+      age: "1s",
+      image: provider.image,
+      ip: "<none>",
+      node: EDERA_SANDBOX_NODE,
+      labels: {},
+      runtimeClassName: "edera",
+    });
+    addEvent(
+      "Normal",
+      "Scheduled",
+      `pod/${name}`,
+      `Successfully assigned default/${name} to ${EDERA_SANDBOX_NODE}`,
+    );
+    reconcileCapabilityProviders();
+  };
+
+  // Start provider pods whose Secret now exists.
+  const reconcileCapabilityProviders = () => {
+    for (const [capability, state] of clusterCapabilities) {
+      if (!state.provider || !state.podName) continue;
+      const pod = pods.find((item) => item.name === state.podName);
+      if (!pod || pod.status === "Running") continue;
+      const secret = state.provider.secretName;
+      if (secret && !clusterSecrets.has(secret)) {
+        if (!clusterEvents.some((event) => event.reason === "FailedMount" && event.object === `pod/${pod.name}`)) {
+          addEvent(
+            "Warning",
+            "FailedMount",
+            `pod/${pod.name}`,
+            `MountVolume.SetUp failed for volume "token" : secret "${secret}" not found`,
+          );
+        }
+        continue;
+      }
+      pod.status = "Running";
+      pod.ip = nextWorkloadPodIp();
+      startEderaZoneForPod(pod);
+      const workload = protectWorkloads.find((item) => item.sourcePodName === pod.name);
+      if (workload) {
+        workload.ocapPublished = Object.keys(state.provider.publishes);
+        workload.ocapPublishCommands = { ...state.provider.publishes };
+        if (state.provider.mountPath) {
+          workload.mounts = [
+            {
+              source: secret ? `secret/${secret}` : "",
+              destination: state.provider.mountPath,
+              readOnly: state.provider.readOnly,
+            },
+          ];
+        }
+      }
+      addEvent("Normal", "Started", `pod/${pod.name}`, `Started container ${state.provider.container}`);
+      for (const published of Object.keys(state.provider.publishes)) {
+        addEvent(
+          "Normal",
+          "OcapPublished",
+          `capability/${capability}`,
+          `Pod ${pod.name} published object capability ${published}`,
+        );
+      }
+    }
+    updateDashboard();
+  };
+
+  const isCapabilityProviderPod = (podName: string) =>
+    [...clusterCapabilities.values()].some((state) => state.podName === podName);
+
+  const describeCapabilityPod = (podName: string): string | undefined => {
+    const entry = [...clusterCapabilities.entries()].find(([, state]) => state.podName === podName);
+    const pod = pods.find((item) => item.name === podName);
+    if (!entry || !pod) return undefined;
+    const [capability, state] = entry;
+    const provider = state.provider!;
+    const running = pod.status === "Running";
+    const started = new Date(state.createdAt).toUTCString().replace("GMT", "+0000");
+    const events = clusterEvents.filter((event) => event.object === `pod/${podName}`);
+    return [
+      `Name:                ${pod.name}`,
+      `Namespace:           ${pod.namespace}`,
+      `Priority:            0`,
+      `Runtime Class Name:  edera`,
+      `Service Account:     default`,
+      `Node:                ${(() => {
+        const node = nodes.find((item) => item.name === pod.node);
+        return node ? `${node.name}/${node.internalIp}` : pod.node;
+      })()}`,
+      `Start Time:          ${started}`,
+      `Labels:              <none>`,
+      `Annotations:         dev.edera/ocap-publish: ${capabilityPublishAnnotation(provider)}`,
+      `Status:              ${running ? "Running" : "Pending"}`,
+      `IP:                  ${running ? pod.ip : ""}`,
+      `Controlled By:       Capability/${capability}`,
+      `Containers:`,
+      `  ${provider.container}:`,
+      `    Image:          ${provider.image}`,
+      `    State:          ${running ? "Running" : "Waiting"}`,
+      ...(running ? [] : [`      Reason:       ContainerCreating`]),
+      `    Ready:          ${running ? "True" : "False"}`,
+      `    Restart Count:  0`,
+      `    Mounts:`,
+      ...(provider.mountPath
+        ? [`      ${provider.mountPath} from token (${provider.readOnly ? "ro" : "rw"},path="token")`]
+        : []),
+      `Volumes:`,
+      ...(provider.secretName
+        ? [
+            `  token:`,
+            `    Type:        Secret (a volume populated by a Secret)`,
+            `    SecretName:  ${provider.secretName}`,
+            `    Optional:    false`,
+          ]
+        : []),
+      `Events:`,
+      `  Type     Reason        Age   From     Message`,
+      `  ----     ------        ----  ----     -------`,
+      ...events
+        .slice(0, 6)
+        .reverse()
+        .map((event) => `  ${event.type.padEnd(8)} ${event.reason.padEnd(13)} ${event.time.padEnd(5)} kubelet  ${event.message}`),
+    ].join("\n");
+  };
+
   const applyCapabilityDoc = (
     doc: RuntimeManifestDoc,
     sourceFile: string,
@@ -7058,12 +7380,20 @@ Kernel isolation: enabled</span>`);
         printHtml(`<span style="color:#a8cfca;">${escapeHtml(capabilityRef("Capability", doc.name))} unchanged</span>`);
         return true;
       }
-      clusterCapabilities.set(doc.name, {
+      const state: ClusterCapabilityState = {
         createdAt: Date.now(),
-        description: capabilityDescriptions[doc.name] || "",
-      });
-      addEvent("Normal", "CapabilityCreated", `capability/${doc.name}`, `Capability ${doc.name} accepted by the OCAP proxy`);
+        description:
+          capabilityDescriptions[doc.name] ||
+          (doc.provider
+            ? `publishes ${Object.keys(doc.provider.publishes).join(", ")}`
+            : ""),
+        provider: doc.provider,
+      };
+      clusterCapabilities.set(doc.name, state);
+      addEvent("Normal", "CapabilityAccepted", `capability/${doc.name}`, `Capability ${doc.name} accepted`);
       printHtml(`<span style="color:#b8ff3c;">${escapeHtml(capabilityRef("Capability", doc.name))} created</span>`);
+      if (doc.provider) createCapabilityProviderPod(doc.name, state);
+      if (doc.name === "github" && doc.provider) markDemoStepComplete("capability-apply");
       return true;
     }
 
@@ -7201,6 +7531,10 @@ Kernel isolation: enabled</span>`);
           ? sandboxTemplates
           : sandboxSessions;
     if (!store.has(name)) return false;
+    if (kind === "Capability") {
+      const podName = clusterCapabilities.get(name)?.podName;
+      if (podName) removeEderaPods((pod) => pod.name === podName);
+    }
     store.delete(name);
     if (kind === "SandboxSession") {
       removeEderaPods((pod) => isSessionPod(pod, name));
@@ -7224,17 +7558,19 @@ Kernel isolation: enabled</span>`);
 
   const capabilityTable = (kind: CapabilityKind, names: string[]) => {
     if (kind === "Capability") {
+      // Columns and values as the edera-runtime controller reports them
+      // today: accepted Capabilities stay Pending with READY unset.
       return formatTerminalTable(
         ["NAME", "PHASE", "ACCEPTED", "READY", "POD", "AGE"],
         names.map((name) => {
-          const users = sessionsUsing(name);
+          const state = clusterCapabilities.get(name)!;
           return [
             { text: name, color: "#b8ff3c" },
-            users.length ? "Bound" : "Available",
+            "Pending",
             "True",
-            "True",
-            users.join(",") || "",
-            ageSince(clusterCapabilities.get(name)!.createdAt),
+            "",
+            state.podName || "",
+            ageSince(state.createdAt),
           ];
         }),
       );
@@ -7315,6 +7651,83 @@ Kernel isolation: enabled</span>`);
   const handleCapabilityResources = (tokens: string[]): boolean => {
     const verb = tokens[1];
 
+    // kubectl create secret generic NAME --from-file=KEY=PATH
+    if (verb === "create" && tokens[2] === "secret") {
+      const name = tokens[4] || "";
+      if (tokens[3] !== "generic" || !name) {
+        printEderaError("error: this lab supports: kubectl create secret generic NAME --from-file=KEY=PATH");
+        return true;
+      }
+      if (clusterSecrets.has(name)) {
+        printEderaError(`error: failed to create secret secrets "${name}" already exists`);
+        return true;
+      }
+      const keys: string[] = [];
+      for (let i = 5; i < tokens.length; i++) {
+        const value = tokens[i].startsWith("--from-file=")
+          ? tokens[i].slice("--from-file=".length)
+          : tokens[i] === "--from-file"
+            ? tokens[++i] || ""
+            : "";
+        if (!value) continue;
+        const [key, path] = value.includes("=") ? value.split("=") : [value.split("/").pop()!, value];
+        if (!HOST_FILES.has(path) && getVirtualFile(resolveVirtualPath(path)) === undefined) {
+          printEderaError(`error: error reading ${path}: no such file or directory`);
+          return true;
+        }
+        keys.push(key);
+      }
+      if (keys.length === 0) {
+        printEderaError("error: at least one --from-file=KEY=PATH is required");
+        return true;
+      }
+      clusterSecrets.set(name, { keys, createdAt: Date.now() });
+      addEvent("Normal", "SecretCreated", `secret/${name}`, `Secret ${name} created with keys ${keys.join(", ")}`);
+      printHtml(`<span style="color:#b8ff3c;">secret/${escapeHtml(name)} created</span>`);
+      if (name === CAPABILITY_SECRET_NAME) markDemoStepComplete("capability-secret");
+      reconcileCapabilityProviders();
+      return true;
+    }
+
+    // kubectl get secret(s) [NAME]
+    if (verb === "get" && ["secret", "secrets"].includes(tokens[2] || "")) {
+      const names = tokens.slice(3).filter((token) => !token.startsWith("-"));
+      const selected = [...clusterSecrets.entries()].filter(
+        ([name]) => names.length === 0 || names.includes(name),
+      );
+      const missing = names.find((name) => !clusterSecrets.has(name));
+      if (missing) {
+        printEderaError(`Error from server (NotFound): secrets "${missing}" not found`);
+      } else if (selected.length === 0) {
+        printHtml(`<span style="color:#a8cfca;">No resources found in default namespace.</span>`);
+      } else {
+        printPre(
+          formatTerminalTable(
+            ["NAME", "TYPE", "DATA", "AGE"],
+            selected.map(([name, secret]) => [
+              { text: name, color: "#b8ff3c" },
+              "Opaque",
+              String(secret.keys.length),
+              ageSince(secret.createdAt),
+            ]),
+          ),
+        );
+      }
+      return true;
+    }
+
+    // kubectl describe po|pod|pods edera-capability-<name>
+    if (
+      verb === "describe" &&
+      ["po", "pod", "pods"].includes(tokens[2] || "") &&
+      tokens[3] &&
+      isCapabilityProviderPod(tokens[3])
+    ) {
+      printPre(escapeHtml(describeCapabilityPod(tokens[3])!));
+      markDemoStepComplete("capability-pod");
+      return true;
+    }
+
     // kubectl apply|delete -f examples/<file>.yaml
     if ((verb === "apply" || verb === "delete") && tokens.includes("-f")) {
       const files = tokens
@@ -7349,7 +7762,7 @@ Kernel isolation: enabled</span>`);
           clusterCapabilities.has(cap),
         )
       ) {
-        markDemoStepComplete("capability-apply");
+        markDemoStepComplete("capability-set-apply");
       }
       updateDashboard();
       return true;
@@ -7441,7 +7854,7 @@ Kernel isolation: enabled</span>`);
         sections.push(capabilityTable(kind, selected));
       }
 
-      if (kind === "Capability" && verb === "get" && selected.length >= 4) {
+      if (kind === "Capability" && verb === "get" && selected.includes("github")) {
         markDemoStepComplete("capability-list");
       }
       if (kind === "SandboxSession" && verb === "get" && selected.includes(SANDBOX_SESSION_NAME)) {
@@ -9096,7 +9509,7 @@ edera_runtime.SessionError: the SandboxSession was rejected (see above)</span>`)
           ...filtered.map((pod) => pod.namespace.length + 2),
         );
         const readyWidth = 8;
-        const statusWidth = 11;
+        const statusWidth = Math.max(11, ...filtered.map((pod) => pod.status.length + 2));
         const restartsWidth = 10;
         const ageWidth = Math.max(
           6,
@@ -10097,9 +10510,7 @@ edera_runtime.SessionError: the SandboxSession was rejected (see above)</span>`)
     input.disabled = false;
     input.focus();
 
-    input.addEventListener(
-      "keydown",
-      async (event) => {
+    const handleTerminalKeydown = async (event: KeyboardEvent) => {
         if (event.key === "ArrowUp") {
           event.preventDefault();
 
@@ -10145,7 +10556,9 @@ edera_runtime.SessionError: the SandboxSession was rejected (see above)</span>`)
           return;
         }
 
-        const rawCmd = input.value.trim();
+        // `cmd | head -n N` runs cmd; the wrapper below trims its output.
+        const typedCmd = input.value.trim();
+        const rawCmd = parseHeadPipe(typedCmd)?.command ?? typedCmd;
 
         input.value = "";
         historyIndex = -1;
@@ -10153,8 +10566,8 @@ edera_runtime.SessionError: the SandboxSession was rejected (see above)</span>`)
         if (!rawCmd) {
           return;
         }
-        commandHistory.push(rawCmd);
-        printCommand(rawCmd);
+        commandHistory.push(typedCmd);
+        printCommand(typedCmd);
         let tokens = tokenize(rawCmd);
         if (tokens[0] === "sudo") {
           tokens = tokens.slice(1);
@@ -10694,6 +11107,9 @@ edera_runtime.SessionError: the SandboxSession was rejected (see above)</span>`)
               ) {
                 markDemoStepComplete("readme-source");
               }
+              if (manifestPath === CAPABILITY_MANIFEST_PATH) {
+                markDemoStepComplete("capability-manifest");
+              }
               if (manifestPath === SANDBOX_TEMPLATE_PATH) {
                 markDemoStepComplete("template-manifest");
               }
@@ -11173,8 +11589,17 @@ edera_runtime.SessionError: the SandboxSession was rejected (see above)</span>`)
           "cli",
           `Unknown command execution attempted: ${rawCmd}`,
         );
-      },
-    );
+    };
+
+    input.addEventListener("keydown", async (event) => {
+      const pipe = event.key === "Enter" ? parseHeadPipe(input.value.trim()) : null;
+      const before = output.children.length;
+      await handleTerminalKeydown(event);
+      if (pipe) {
+        // Skip the echoed command line, then keep the first N output lines.
+        limitOutputLines([...output.children].slice(before + 1), pipe.lines);
+      }
+    });
   } catch (error: any) {
     output.innerHTML = `
       <div style="color:#ff7373;">

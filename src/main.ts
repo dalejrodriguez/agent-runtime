@@ -1160,7 +1160,7 @@ const ALL_AGENT_SANDBOX_DEMO_STEPS: DemoStep[] = [
     id: "protect-zone-launch",
     title: "Launch a zone",
     description:
-      "A zone is the isolation boundary: its own kernel, memory and process space. Zones don't publish capabilities themselves; workloads running inside them do, with <code class='guide-code'>--ocap-publish</code>. You'll launch a workload that publishes one in a moment.",
+      "A zone is the isolation boundary: its own kernel, memory and process space. Zones don't publish capabilities themselves; workloads running inside them do, with <code class='guide-code'>--ocap-publish</code>. You'll launch one that does next.",
     command: `protect zone launch --name ${OCAP_ZONE_NAME}`,
   },
   {
@@ -1244,7 +1244,7 @@ const ALL_AGENT_SANDBOX_DEMO_STEPS: DemoStep[] = [
     id: "readme-zone-launch",
     title: "Launch a capability provider zone",
     description:
-      `So far the zone published a capability from a manifest. A workload can publish one too. Start a fresh zone, <code class='guide-code'>${README_ZONE_NAME}</code>, for the provider to run in.`,
+      `Capabilities are published by workloads. Start a second zone, <code class='guide-code'>${README_ZONE_NAME}</code>, for the provider workload to run in; it holds the credential, isolated from whoever calls it.`,
     command: `protect zone launch -n ${README_ZONE_NAME}`,
   },
   {
@@ -1258,9 +1258,8 @@ const ALL_AGENT_SANDBOX_DEMO_STEPS: DemoStep[] = [
     id: "readme-image-build",
     title: "Build the provider image",
     description:
-      `Each language directory has a Dockerfile whose entrypoint is <code class='guide-code'>/readme-fetch idle</code>. The images are already published to ttl.sh for this lab, so building is optional.`,
+      `Each language directory has a Dockerfile whose entrypoint is <code class='guide-code'>/readme-fetch idle</code>. Build the Rust image; <code class='guide-code'>python</code> and <code class='guide-code'>typescript</code> build the same way.`,
     command: `docker build -t ${README_WORKLOAD_IMAGE} rust`,
-    optional: true,
   },
   {
     id: "readme-workload-launch",
@@ -1506,6 +1505,8 @@ const LAST_GUIDED_STEP_ID = "session-cleanup";
 // Steps kept out of the guide to keep it short. Their commands still work in
 // the terminal (and are listed in `help`); they just aren't walked through.
 const UNGUIDED_STEP_IDS = new Set([
+  "protect-zone-destroy",
+  "protect-zone-list-final",
   "protect-zone-list-ready",
   "ocap-relay-launch",
   "ocap-workload-help",

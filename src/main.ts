@@ -1244,8 +1244,8 @@ const ALL_AGENT_SANDBOX_DEMO_STEPS: DemoStep[] = [
     id: "readme-zone-launch",
     title: "Launch a capability provider zone",
     description:
-      `Capabilities are published by workloads. Start a second zone, <code class='guide-code'>${README_ZONE_NAME}</code>, for the provider workload to run in; it holds the credential, isolated from whoever calls it.`,
-    command: `protect zone launch -n ${README_ZONE_NAME}`,
+      `A zone is the isolation boundary: its own kernel, memory and process space. Zones don't publish capabilities themselves; workloads inside them do, with <code class='guide-code'>--ocap-publish</code>. Launch <code class='guide-code'>${README_ZONE_NAME}</code> for the provider workload, which holds the credential, isolated from whoever calls it.`,
+    command: `protect zone launch --name ${README_ZONE_NAME}`,
   },
   {
     id: "readme-source",
@@ -1505,6 +1505,9 @@ const LAST_GUIDED_STEP_ID = "session-cleanup";
 // Steps kept out of the guide to keep it short. Their commands still work in
 // the terminal (and are listed in `help`); they just aren't walked through.
 const UNGUIDED_STEP_IDS = new Set([
+  "protect-zone-list-initial",
+  "ocap-definition",
+  "protect-zone-launch",
   "protect-zone-destroy",
   "protect-zone-list-final",
   "protect-zone-list-ready",
